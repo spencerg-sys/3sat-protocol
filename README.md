@@ -1,8 +1,21 @@
 # 3SAT Protocol
 
-Smart contracts for 3SAT Network: a token-denominated bounty protocol for posting, solving, verifying, and settling SAT/CNF outcomes on EVM chains.
+3SAT Protocol is an open-source smart contract system for SAT problem markets on EVM chains.
 
-`3SAT` is an ERC-20 token. The protocol does not create a new blockchain, L1, L2, rollup, bridge, validator network, wrapped-token system, faucet, or gas coin. Users pay gas with the native asset of the chain where the contracts are deployed.
+The protocol lets an issuer escrow a token-denominated bounty for a SAT/CNF instance, lets solvers submit solutions through a commit-reveal flow, lets staked verifiers attest to revealed submissions, and settles rewards once the verification rules are satisfied.
+
+`3SAT` is an ERC-20 token. The protocol is not a new blockchain, rollup, bridge, validator network, wrapped-token system, faucet, or gas coin. Users pay gas with the native asset of the chain where the contracts are deployed.
+
+## What The Protocol Does
+
+- Issuers post SAT/CNF bounties and escrow the bounty reward.
+- Solvers commit to a solution before revealing the solution reference and digest.
+- Verifiers stake `3SAT`, check revealed submissions, and attest accept or reject.
+- Accepted submissions can be finalized by protocol automation or any eligible caller.
+- Finalized answers can be made available through paid artifact access.
+- Protocol fees can be routed between burn and treasury.
+
+The web application, indexer, storage service, solver clients, and verifier clients are separate from this contract repository.
 
 ## Repository Layout
 
@@ -10,24 +23,24 @@ Smart contracts for 3SAT Network: a token-denominated bounty protocol for postin
 - `contracts/script`: Foundry deployment script.
 - `contracts/test`: Foundry tests.
 - `contracts/lib`: vendored Foundry dependencies used by the test suite.
-- `contracts/deployments`: generated deployment records; JSON files are ignored unless intentionally added for a release.
-- `docs`: protocol, deployment, and security notes.
+- `contracts/deployments`: optional generated deployment records; JSON files are ignored by default.
+- `docs`: supplementary protocol notes.
 
 ## Core Contracts
 
 - `SATToken`: fixed-supply `3SAT` ERC-20 with one-time genesis allocation.
-- `TokenVesting`: team and investor vesting vault.
+- `TokenVesting`: token vesting vault used for team and investor allocations.
 - `CommunityIncentivesController`: community allocation controller with cumulative annual caps.
 - `TreasuryReserveController`: treasury reserve controller with bootstrap and strategic unlock schedules.
-- `TreasuryRouter`: routes protocol fees through burn and treasury distribution.
-- `VerifierRegistry`: verifier staking, eligibility, unbonding, governance disablement, and authorized slashing.
+- `TreasuryRouter`: routes protocol fees between token burn and treasury distribution.
+- `VerifierRegistry`: verifier staking, eligibility, unbonding, disablement, and authorized slashing.
 - `BountyManager`: bounty escrow, solver commit-reveal, solver bonds, verifier attestations, quorum, finalization, and reward accounting.
 - `ArtifactAccessController`: paid access rights for finalized solution artifacts.
-- `ProtocolTimelock`: optional OpenZeppelin timelock wrapper for governance ownership.
+- `ProtocolTimelock`: optional OpenZeppelin timelock wrapper for future governance ownership.
 
 ## Token Allocation
 
-`S_MAX` is immutable and minted exactly once through `SATToken.initializeGenesisAllocations(...)`.
+`S_MAX` is immutable after deployment and is minted exactly once through `SATToken.initializeGenesisAllocations(...)`.
 
 | Allocation | Share | Recipient |
 | --- | ---: | --- |
@@ -41,19 +54,71 @@ Unlocks transfer already-minted tokens from holder/controller contracts. Unlocks
 
 ## Current Protocol Parameters
 
-Deployment defaults can be overridden by environment variables.
+The table below reflects the current reference configuration used by the protocol contracts. Governance-controlled values can be changed by the contract owner or future governance owner after deployment.
 
-| Parameter | Default |
+### Token Parameters
+
+| Parameter | Current reference value | Notes |
+| --- | ---: | --- |
+| Token standard | ERC-20 | `SATToken` |
+| Token decimals | `18` | Standard ERC-20 precision |
+| Reference max supply | `1,000,000,000 3SAT` | Set through immutable `S_MAX` at deployment |
+| Genesis minting | one-time only | No account can mint after genesis allocation |
+
+### Bounty Parameters
+
+These are set per bounty by the issuer when a bounty is created.
+
+| Parameter | Meaning |
+| --- | --- |
+| Reward | Main bounty reward escrowed for the winning solver |
+| Commit window | Time available for solvers to commit solution hashes |
+| Reveal window | Time available for committed solvers to reveal solution references and digests |
+| Verification window | Time available for eligible verifiers to attest to revealed submissions |
+| Verifier quorum | Number of accept attestations required for an accepted candidate |
+
+The protocol uses stage-based timing: commit, reveal, and verification windows are sequential phases.
+
+### Governance-Controlled Parameters
+
+| Parameter | Current reference value | Contract | Notes |
+| --- | ---: | --- | --- |
+| Verifier minimum stake | `1,000 3SAT` | `VerifierRegistry` | Required for verifier eligibility |
+| Verifier unbonding delay | `15 days` | `VerifierRegistry` | Delay before requested unstake can be withdrawn |
+| Official verifier slash | `50%` | `VerifierRegistry` | Owner-authorized slash also disables the verifier |
+| Solver bond | `10 3SAT` | `BountyManager` | Bond posted when committing a solution |
+| Verifier reward pool | `2%` of bounty reward | `BountyManager` | Reserved from issuer escrow and split among correct accepting verifiers |
+| Max verifier reward pool | `10%` of bounty reward | `BountyManager` | Contract-level cap |
+| Treasury burn share | `20%` of routed fees | `TreasuryRouter` | Remaining routed amount goes to treasury |
+| Default solver access reward | `1%` of bounty reward | `ArtifactAccessController` | Target amount paid to the winning solver per answer access purchase |
+| Max default solver access reward | `10%` of bounty reward | `ArtifactAccessController` | Contract-level cap |
+| Solver royalty share of access fee | `50%` | `ArtifactAccessController` | Remaining access fee is routed through `TreasuryRouter` |
+| Max solver royalty share | `50%` | `ArtifactAccessController` | Contract-level cap |
+
+### Answer Access Economics
+
+With the current reference settings, paid answer download works as follows:
+
+| Flow | Amount |
 | --- | ---: |
-| Verifier minimum stake | `1000 3SAT` |
-| Verifier unbonding delay | `15 days` |
-| Solver bond | `10 3SAT` |
-| Verifier reward pool | `2%` of bounty reward |
-| TreasuryRouter burn | `20%` of routed fees |
-| Default solver access reward | `1%` of bounty reward |
-| Solver share of answer access fee | `50%` |
+| User pays to access a finalized answer | `2%` of bounty reward |
+| Winning solver receives | `1%` of bounty reward |
+| Routed through `TreasuryRouter` | `1%` of bounty reward |
+| Burned from routed amount | `20%` |
+| Sent to treasury from routed amount | `80%` |
 
-With the default answer-access settings, a finalized solution download costs `2%` of the bounty reward: `1%` goes to the winning solver and `1%` is routed through `TreasuryRouter`, where `20%` burns and `80%` goes to treasury.
+In effect, a paid finalized-answer download sends `1%` of the bounty reward to the winning solver, burns `0.2%`, and sends `0.8%` to treasury.
+
+Issuer access to the finalized winning answer is free.
+
+### Finalization Rules
+
+| Case | Result |
+| --- | --- |
+| Required accept quorum is reached | Submission can be finalized immediately |
+| Verification window ends without an accepted candidate | Bounty can finalize without a winner according to contract rules |
+| Solver commits but does not reveal | The unrevealed solver bond can be claimed according to timeout rules |
+| Solver reveals with invalid preimage or digest | The solver bond is slashed according to contract rules |
 
 ## Development
 
@@ -67,23 +132,6 @@ forge test
 
 The repository vendors the required Foundry dependencies in `contracts/lib` for reproducible local testing.
 
-## Deployment
+## License
 
-Copy the environment template and fill production values outside git:
-
-```bash
-cd contracts
-cp .env.example .env
-```
-
-Use `script/Deploy.s.sol` for local, Sepolia, Arbitrum Sepolia, Arbitrum One, and Ethereum mainnet deployments. Mainnet and Arbitrum One deployments require `PRODUCTION_DEPLOYMENT_APPROVED=true` and contract-based governance addresses.
-
-See:
-
-- `docs/PROTOCOL_SPEC.md`
-- `docs/DEPLOYMENT.md`
-- `docs/SECURITY_NOTES.md`
-
-## Security
-
-These contracts should be externally audited before handling production value. The repository is intended to make protocol logic inspectable and verifiable; it is not a substitute for an audit, operational monitoring, or multisig/timelock governance.
+MIT
