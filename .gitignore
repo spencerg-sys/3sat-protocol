@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+
+.env
+.env.*
+!.env.example
+
+contracts/cache/
+contracts/out/
+contracts/broadcast/
+contracts/deployments/*.json
+
+anvil-*.txt
+*.log
+.DS_Store
+Thumbs.db
