@@ -285,7 +285,6 @@ contract ArtifactAccessControllerTest is Test {
         submissionId = manager.commitSolution(bountyId, commitHash);
         vm.stopPrank();
 
-        vm.warp(GENESIS + COMMIT_WINDOW + 1);
         vm.prank(solver);
         manager.revealSolution(bountyId, submissionId, solutionRef, solutionDigest, salt);
 

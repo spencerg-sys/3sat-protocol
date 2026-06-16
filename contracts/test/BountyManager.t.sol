@@ -109,11 +109,39 @@ contract BountyManagerTest is Test {
         assertEq(uint256(submission.state), uint256(BountyManager.SubmissionState.Revealed));
     }
 
+    function testCommitAllowsImmediateRevealAndStartsVerificationWindow() public {
+        uint256 bountyId = _createBounty();
+        uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
+        BountyManager.Bounty memory afterCommit = manager.getBounty(bountyId);
+        assertEq(afterCommit.commitDeadline, block.timestamp);
+        assertEq(afterCommit.revealDeadline, block.timestamp + REVEAL_WINDOW);
+        assertEq(manager.activeSubmissionId(bountyId), submissionId);
+
+        vm.prank(solver);
+        manager.revealSolution(bountyId, submissionId, solutionRef, solutionDigest, salt);
+
+        BountyManager.Bounty memory afterReveal = manager.getBounty(bountyId);
+        assertEq(afterReveal.revealDeadline, block.timestamp);
+        assertEq(afterReveal.verificationDeadline, block.timestamp + VERIFICATION_WINDOW);
+    }
+
+    function testActiveSubmissionBlocksCompetingCommitUntilResolved() public {
+        uint256 bountyId = _createBounty();
+        _commit(bountyId, solver, solutionRef, solutionDigest, salt);
+
+        bytes32 competingCommitHash = manager.computeCommitHash(
+            bountyId, solverTwo, "ipfs://solution-two", keccak256("solution-two"), keccak256("salt-two")
+        );
+        vm.startPrank(solverTwo);
+        token.approve(address(manager), solverBond);
+        vm.expectRevert();
+        manager.commitSolution(bountyId, competingCommitHash);
+        vm.stopPrank();
+    }
+
     function testWrongSaltRevealSlashesSolverBond() public {
         uint256 bountyId = _createBounty();
         uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
-        vm.warp(GENESIS + COMMIT_WINDOW + 1);
-
         uint256 supplyBefore = token.totalSupply();
         uint256 treasuryBefore = token.balanceOf(treasury);
         vm.prank(solver);
@@ -124,13 +152,12 @@ contract BountyManagerTest is Test {
         assertTrue(submission.bondSlashed);
         assertEq(token.totalSupply(), supplyBefore - ((solverBond * 2_000) / 10_000));
         assertEq(token.balanceOf(treasury), treasuryBefore + ((solverBond * 8_000) / 10_000));
+        assertEq(manager.activeSubmissionId(bountyId), 0);
     }
 
     function testWrongSolutionDigestRevealSlashesSolverBond() public {
         uint256 bountyId = _createBounty();
         uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
-        vm.warp(GENESIS + COMMIT_WINDOW + 1);
-
         vm.prank(solver);
         manager.revealSolution(bountyId, submissionId, solutionRef, keccak256("different-solution"), salt);
 
@@ -139,18 +166,20 @@ contract BountyManagerTest is Test {
         assertTrue(submission.bondSlashed);
         assertEq(submission.solutionRef, "");
         assertEq(submission.solutionDigest, bytes32(0));
+        assertEq(manager.activeSubmissionId(bountyId), 0);
     }
 
     function testNonRevealTimeoutSlashesSolver() public {
         uint256 bountyId = _createBounty();
         uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
 
-        vm.warp(GENESIS + COMMIT_WINDOW + REVEAL_WINDOW + 1);
+        vm.warp(GENESIS + REVEAL_WINDOW + 1);
         manager.slashExpiredSubmission(bountyId, submissionId);
 
         BountyManager.Submission memory submission = manager.getSubmission(bountyId, submissionId);
         assertEq(uint256(submission.state), uint256(BountyManager.SubmissionState.Invalid));
         assertTrue(submission.bondSlashed);
+        assertEq(manager.activeSubmissionId(bountyId), 0);
     }
 
     function testVerifierStakingEligibilityAndUnbonding() public {
@@ -216,8 +245,7 @@ contract BountyManagerTest is Test {
         assertEq(manager.finalizedWinningSolver(bountyId), solver);
     }
 
-    function testQuorumRejectedAndInvalidFinalizationRefundsIssuer() public {
-        uint256 issuerBefore = token.balanceOf(issuer);
+    function testQuorumRejectedSlashesSolverAndReopensBounty() public {
         (uint256 bountyId, uint256 submissionId,) = _createCommitReveal();
 
         vm.prank(verifierA);
@@ -227,14 +255,16 @@ contract BountyManagerTest is Test {
 
         BountyManager.Submission memory submission = manager.getSubmission(bountyId, submissionId);
         assertEq(uint256(submission.state), uint256(BountyManager.SubmissionState.PendingRejected));
+        assertTrue(submission.bondSlashed);
+        assertTrue(submission.bondSettled);
+        assertEq(manager.activeSubmissionId(bountyId), 0);
 
-        _warpPastVerificationDeadline();
-        manager.finalize(bountyId, submissionId);
+        BountyManager.Bounty memory bounty = manager.getBounty(bountyId);
+        assertEq(bounty.commitDeadline, block.timestamp + COMMIT_WINDOW);
 
-        assertEq(token.balanceOf(issuer), issuerBefore - postingFee);
-        BountyManager.Submission memory finalized = manager.getSubmission(bountyId, submissionId);
-        assertEq(uint256(finalized.state), uint256(BountyManager.SubmissionState.Finalized));
-        assertTrue(finalized.bondSlashed);
+        uint256 nextSubmissionId =
+            _commit(bountyId, solverTwo, "ipfs://solution-two", keccak256("solution-two"), keccak256("salt-two"));
+        assertEq(nextSubmissionId, 2);
     }
 
     function testValidFinalizationPaysSolverRewardRefundsBondAndRoutesPostingFee() public {
@@ -257,13 +287,15 @@ contract BountyManagerTest is Test {
         assertEq(token.balanceOf(address(manager)), 0);
     }
 
-    function testNoRevealFinalizationRefundsIssuerAndSlashesSolver() public {
+    function testNoRevealTimeoutReopensThenNoWinnerFinalizationRefundsIssuer() public {
         uint256 issuerBefore = token.balanceOf(issuer);
         uint256 bountyId = _createBounty();
         uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
 
-        _warpPastVerificationDeadline();
-        manager.finalize(bountyId, submissionId);
+        vm.warp(GENESIS + REVEAL_WINDOW + 1);
+        manager.slashExpiredSubmission(bountyId, submissionId);
+        vm.warp(block.timestamp + COMMIT_WINDOW + 1);
+        manager.finalize(bountyId, 0);
 
         assertEq(token.balanceOf(issuer), issuerBefore - postingFee);
         BountyManager.Submission memory submission = manager.getSubmission(bountyId, submissionId);
@@ -295,6 +327,7 @@ contract BountyManagerTest is Test {
 
         BountyManager.Bounty memory bounty = manager.getBounty(bountyId);
         assertFalse(bounty.finalized);
+        assertEq(manager.activeSubmissionId(bountyId), 0);
     }
 
     function testNoWinnerFinalizeWithNoQuorumRefundsRevealedSolverBond() public {
@@ -392,27 +425,30 @@ contract BountyManagerTest is Test {
         assertEq(token.totalSupply(), supplyBefore - 50 ether);
     }
 
-    function testMultiSolverScenarioWinningSolverPaidLosingSolverCanClaimBond() public {
+    function testRejectedSubmissionReopensAndNextSolverCanWin() public {
         uint256 bountyId = _createBounty();
-        uint256 winningSubmissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
-        uint256 losingSubmissionId =
-            _commit(bountyId, solverTwo, "ipfs://solution-two", keccak256("solution-two"), keccak256("salt-two"));
+        uint256 rejectedSubmissionId =
+            _commit(bountyId, solverTwo, "ipfs://bad", keccak256("bad"), keccak256("bad-salt"));
+        vm.prank(solverTwo);
+        manager.revealSolution(bountyId, rejectedSubmissionId, "ipfs://bad", keccak256("bad"), keccak256("bad-salt"));
+        vm.prank(verifierA);
+        manager.attest(bountyId, rejectedSubmissionId, false, "ipfs://bad", keccak256("bad"));
+        vm.prank(verifierB);
+        manager.attest(bountyId, rejectedSubmissionId, false, "ipfs://bad", keccak256("bad"));
 
-        vm.warp(GENESIS + COMMIT_WINDOW + 1);
+        uint256 winningSubmissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
         vm.prank(solver);
         manager.revealSolution(bountyId, winningSubmissionId, solutionRef, solutionDigest, salt);
-        vm.prank(solverTwo);
-        manager.revealSolution(
-            bountyId, losingSubmissionId, "ipfs://solution-two", keccak256("solution-two"), keccak256("salt-two")
-        );
 
         _attestFor(bountyId, winningSubmissionId);
         manager.finalize(bountyId, winningSubmissionId);
 
-        uint256 solverTwoBefore = token.balanceOf(solverTwo);
+        BountyManager.Submission memory rejected = manager.getSubmission(bountyId, rejectedSubmissionId);
+        assertTrue(rejected.bondSlashed);
+        assertTrue(rejected.bondSettled);
+        vm.expectRevert();
         vm.prank(solverTwo);
-        manager.claimSolverBond(bountyId, losingSubmissionId);
-        assertEq(token.balanceOf(solverTwo), solverTwoBefore + solverBond);
+        manager.claimSolverBond(bountyId, rejectedSubmissionId);
     }
 
     function testAccountingInvariantAcceptedFlowLeavesNoManagerEscrow() public {
@@ -477,7 +513,6 @@ contract BountyManagerTest is Test {
         submissionId = manager.commitSolution(bountyId, commitHash);
         vm.stopPrank();
 
-        vm.warp(GENESIS + COMMIT_WINDOW + 1);
         vm.prank(solver);
         manager.revealSolution(bountyId, submissionId, solutionRef, solutionDigest, salt);
     }
@@ -490,6 +525,6 @@ contract BountyManagerTest is Test {
     }
 
     function _warpPastVerificationDeadline() internal {
-        vm.warp(GENESIS + COMMIT_WINDOW + REVEAL_WINDOW + VERIFICATION_WINDOW + 1);
+        vm.warp(block.timestamp + VERIFICATION_WINDOW + 1);
     }
 }

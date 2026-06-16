@@ -87,6 +87,10 @@ contract BountyManager is Ownable, ReentrancyGuard {
     uint256 public nextBountyId = 1;
     mapping(uint256 bountyId => uint256 submissionId) public finalizedWinningSubmissionId;
     mapping(uint256 bountyId => address solver) public finalizedWinningSolver;
+    mapping(uint256 bountyId => uint64 window) public bountyCommitWindow;
+    mapping(uint256 bountyId => uint64 window) public bountyRevealWindow;
+    mapping(uint256 bountyId => uint64 window) public bountyVerificationWindow;
+    mapping(uint256 bountyId => uint256 submissionId) public activeSubmissionId;
 
     mapping(uint256 bountyId => Bounty) private bounties;
     mapping(uint256 bountyId => mapping(uint256 submissionId => Submission)) private submissions;
@@ -124,6 +128,9 @@ contract BountyManager is Ownable, ReentrancyGuard {
     );
     event QuorumReached(uint256 indexed bountyId, uint256 indexed submissionId, bool accepted);
     event Finalized(uint256 indexed bountyId, uint256 indexed submissionId, bool solverWon);
+    event BountyReopened(
+        uint256 indexed bountyId, uint64 commitDeadline, uint64 revealDeadline, uint64 verificationDeadline
+    );
     event RewardPaid(uint256 indexed bountyId, uint256 indexed submissionId, address indexed solver, uint256 reward);
     event VerifierRewardPaid(
         uint256 indexed bountyId, uint256 indexed submissionId, address indexed verifier, uint256 amount
@@ -204,6 +211,9 @@ contract BountyManager is Ownable, ReentrancyGuard {
         uint64 commitDeadline = uint64(block.timestamp) + commitWindow;
         uint64 revealDeadline = commitDeadline + revealWindow;
         uint64 verificationDeadline = revealDeadline + verificationWindow;
+        bountyCommitWindow[bountyId] = commitWindow;
+        bountyRevealWindow[bountyId] = revealWindow;
+        bountyVerificationWindow[bountyId] = verificationWindow;
 
         bounties[bountyId] = Bounty({
             issuer: msg.sender,
@@ -247,6 +257,10 @@ contract BountyManager is Ownable, ReentrancyGuard {
     {
         Bounty storage bounty = bounties[bountyId];
         _requireBountyOpen(bounty);
+        uint256 currentActiveSubmissionId = activeSubmissionId[bountyId];
+        if (currentActiveSubmissionId != 0) {
+            revert InvalidState(submissions[bountyId][currentActiveSubmissionId].state);
+        }
         if (block.timestamp > bounty.commitDeadline) {
             revert WindowClosed();
         }
@@ -272,6 +286,10 @@ contract BountyManager is Ownable, ReentrancyGuard {
         });
 
         token.safeTransferFrom(msg.sender, address(this), solverBond);
+        activeSubmissionId[bountyId] = submissionId;
+        bounty.commitDeadline = uint64(block.timestamp);
+        bounty.revealDeadline = uint64(block.timestamp) + bountyRevealWindow[bountyId];
+        bounty.verificationDeadline = bounty.revealDeadline + bountyVerificationWindow[bountyId];
         emit SolutionCommitted(bountyId, submissionId, msg.sender, commitHash);
     }
 
@@ -288,10 +306,13 @@ contract BountyManager is Ownable, ReentrancyGuard {
         if (submission.state != SubmissionState.Committed) {
             revert InvalidState(submission.state);
         }
+        if (activeSubmissionId[bountyId] != submissionId) {
+            revert InvalidState(submission.state);
+        }
         if (msg.sender != submission.solver) {
             revert InvalidReveal();
         }
-        if (block.timestamp <= bounty.commitDeadline || block.timestamp > bounty.revealDeadline) {
+        if (block.timestamp > bounty.revealDeadline) {
             revert WindowClosed();
         }
         if (bytes(solutionRef).length == 0 || solutionDigest == bytes32(0)) {
@@ -302,6 +323,7 @@ contract BountyManager is Ownable, ReentrancyGuard {
         if (expected != submission.commitHash) {
             submission.state = SubmissionState.Invalid;
             _slashSolverBondToRouter(bountyId, submissionId, submission);
+            _reopenCommitWindow(bountyId, bounty);
             return;
         }
 
@@ -309,6 +331,8 @@ contract BountyManager is Ownable, ReentrancyGuard {
         submission.solutionDigest = solutionDigest;
         submission.revealedAt = uint64(block.timestamp);
         submission.state = SubmissionState.Revealed;
+        bounty.revealDeadline = uint64(block.timestamp);
+        bounty.verificationDeadline = uint64(block.timestamp) + bountyVerificationWindow[bountyId];
         emit SolutionRevealed(bountyId, submissionId, msg.sender, solutionRef, solutionDigest);
     }
 
@@ -327,6 +351,9 @@ contract BountyManager is Ownable, ReentrancyGuard {
         }
         submission.state = SubmissionState.Invalid;
         _slashSolverBondToRouter(bountyId, submissionId, submission);
+        if (activeSubmissionId[bountyId] == submissionId) {
+            _reopenCommitWindow(bountyId, bounty);
+        }
     }
 
     function attest(
@@ -335,11 +362,14 @@ contract BountyManager is Ownable, ReentrancyGuard {
         bool support,
         string calldata solutionRef,
         bytes32 solutionDigest
-    ) external onlyExistingBounty(bountyId) {
+    ) external onlyExistingBounty(bountyId) nonReentrant {
         Bounty storage bounty = bounties[bountyId];
         _requireBountyOpen(bounty);
         Submission storage submission = _submission(bountyId, submissionId);
         if (submission.state != SubmissionState.Revealed) {
+            revert InvalidState(submission.state);
+        }
+        if (activeSubmissionId[bountyId] != submissionId) {
             revert InvalidState(submission.state);
         }
         if (block.timestamp > bounty.verificationDeadline) {
@@ -393,7 +423,7 @@ contract BountyManager is Ownable, ReentrancyGuard {
         _requireBountyOpen(bounty);
 
         if (submissionId == 0) {
-            _requireNoWinnerFinalizable(bounty);
+            _requireNoWinnerFinalizable(bountyId, bounty);
             bounty.finalized = true;
             _routePostingFee(bountyId, bounty);
             _refundVerifierRewardPool(bountyId, bounty);
@@ -521,7 +551,7 @@ contract BountyManager is Ownable, ReentrancyGuard {
             return false;
         }
         if (submissionId == 0) {
-            return _isNoWinnerFinalizable(bounty);
+            return _isNoWinnerFinalizable(bountyId, bounty);
         }
         Submission storage submission = submissions[bountyId][submissionId];
         if (submission.solver == address(0)) {
@@ -531,16 +561,16 @@ contract BountyManager is Ownable, ReentrancyGuard {
             return true;
         }
         if (submission.state == SubmissionState.Invalid) {
-            return _isNoWinnerFinalizable(bounty);
+            return _isNoWinnerFinalizable(bountyId, bounty);
         }
         if (submission.state == SubmissionState.Committed) {
-            return block.timestamp > bounty.revealDeadline && _isNoWinnerFinalizable(bounty);
+            return block.timestamp > bounty.revealDeadline && _isNoWinnerFinalizable(bountyId, bounty);
         }
         if (submission.state == SubmissionState.PendingRejected) {
-            return block.timestamp > bounty.verificationDeadline && _isNoWinnerFinalizable(bounty);
+            return _isNoWinnerFinalizable(bountyId, bounty);
         }
         if (submission.state == SubmissionState.Revealed) {
-            return _isNoWinnerFinalizable(bounty);
+            return _isNoWinnerFinalizable(bountyId, bounty);
         }
         return false;
     }
@@ -575,6 +605,9 @@ contract BountyManager is Ownable, ReentrancyGuard {
         submission.quorumReachedAt = uint64(block.timestamp);
         if (accepted) {
             bounty.acceptedCandidateCount++;
+        } else {
+            _slashSolverBondToRouter(bountyId, submissionId, submission);
+            _reopenCommitWindow(bountyId, bounty);
         }
         emit QuorumReached(bountyId, submissionId, accepted);
     }
@@ -589,7 +622,7 @@ contract BountyManager is Ownable, ReentrancyGuard {
             return _prepareWinningFinalization(bounty, submission);
         }
 
-        _requireNoWinnerFinalizable(bounty);
+        _requireNoWinnerFinalizable(bountyId, bounty);
         settlement.rewardRecipient = bounty.issuer;
         if (submission.state == SubmissionState.Committed) {
             if (block.timestamp <= bounty.revealDeadline) {
@@ -603,9 +636,6 @@ contract BountyManager is Ownable, ReentrancyGuard {
             return settlement;
         }
         if (submission.state == SubmissionState.PendingRejected) {
-            if (block.timestamp <= bounty.verificationDeadline) {
-                revert NotFinalizable();
-            }
             submission.state = SubmissionState.Finalized;
             settlement.solverSlash = _takeSolverBond(bountyId, submissionId, submission);
             if (settlement.solverSlash != 0) {
@@ -640,14 +670,35 @@ contract BountyManager is Ownable, ReentrancyGuard {
         bounty.acceptedCandidateCount = 0;
     }
 
-    function _requireNoWinnerFinalizable(Bounty storage bounty) internal view {
-        if (!_isNoWinnerFinalizable(bounty)) {
+    function _requireNoWinnerFinalizable(uint256 bountyId, Bounty storage bounty) internal view {
+        if (!_isNoWinnerFinalizable(bountyId, bounty)) {
             revert NotFinalizable();
         }
     }
 
-    function _isNoWinnerFinalizable(Bounty storage bounty) internal view returns (bool) {
-        return block.timestamp > bounty.verificationDeadline && bounty.acceptedCandidateCount == 0;
+    function _isNoWinnerFinalizable(uint256 bountyId, Bounty storage bounty) internal view returns (bool) {
+        if (bounty.acceptedCandidateCount != 0) {
+            return false;
+        }
+
+        uint256 currentActiveSubmissionId = activeSubmissionId[bountyId];
+        if (currentActiveSubmissionId == 0) {
+            return block.timestamp > bounty.commitDeadline;
+        }
+
+        Submission storage submission = submissions[bountyId][currentActiveSubmissionId];
+        return submission.state == SubmissionState.Revealed && block.timestamp > bounty.verificationDeadline;
+    }
+
+    function _reopenCommitWindow(uint256 bountyId, Bounty storage bounty) internal {
+        activeSubmissionId[bountyId] = 0;
+        uint64 commitDeadline = uint64(block.timestamp) + bountyCommitWindow[bountyId];
+        uint64 revealDeadline = commitDeadline + bountyRevealWindow[bountyId];
+        uint64 verificationDeadline = revealDeadline + bountyVerificationWindow[bountyId];
+        bounty.commitDeadline = commitDeadline;
+        bounty.revealDeadline = revealDeadline;
+        bounty.verificationDeadline = verificationDeadline;
+        emit BountyReopened(bountyId, commitDeadline, revealDeadline, verificationDeadline);
     }
 
     function _refundSolverBond(uint256 bountyId, uint256 submissionId, Submission storage submission) internal {
