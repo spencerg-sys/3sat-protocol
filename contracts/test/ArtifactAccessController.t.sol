@@ -278,7 +278,7 @@ contract ArtifactAccessControllerTest is Test {
 
     function _finalizedBounty() internal returns (uint256 bountyId, uint256 submissionId) {
         bountyId = _createBounty();
-        bytes32 commitHash = manager.computeCommitHash(bountyId, solver, solutionRef, solutionDigest, salt);
+        bytes32 commitHash = manager.computeCommitHash(bountyId, solver, BountyManager.SolutionKind.SatAssignment, BountyManager.ProofFormat.None, solutionRef, solutionDigest, salt);
 
         vm.startPrank(solver);
         token.approve(address(manager), solverBond);
@@ -286,12 +286,12 @@ contract ArtifactAccessControllerTest is Test {
         vm.stopPrank();
 
         vm.prank(solver);
-        manager.revealSolution(bountyId, submissionId, solutionRef, solutionDigest, salt);
+        manager.revealSolution(bountyId, submissionId, BountyManager.SolutionKind.SatAssignment, BountyManager.ProofFormat.None, solutionRef, solutionDigest, salt);
 
         vm.prank(verifierA);
-        manager.attest(bountyId, submissionId, true, solutionRef, solutionDigest);
+        manager.attest(bountyId, submissionId, true, BountyManager.SolutionKind.SatAssignment, BountyManager.ProofFormat.None, solutionRef, solutionDigest);
         vm.prank(verifierB);
-        manager.attest(bountyId, submissionId, true, solutionRef, solutionDigest);
+        manager.attest(bountyId, submissionId, true, BountyManager.SolutionKind.SatAssignment, BountyManager.ProofFormat.None, solutionRef, solutionDigest);
 
         manager.finalize(bountyId, submissionId);
     }
