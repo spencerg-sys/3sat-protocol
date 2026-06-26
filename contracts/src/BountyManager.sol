@@ -42,6 +42,7 @@ contract BountyManager is Ownable, ReentrancyGuard {
 
     struct Bounty {
         address issuer;
+        address paymentToken;
         string instanceCID;
         bytes32 instanceDigest;
         string metadataURI;
@@ -66,6 +67,7 @@ contract BountyManager is Ownable, ReentrancyGuard {
         bytes32 solutionDigest;
         SolutionKind solutionKind;
         ProofFormat proofFormat;
+        address bondToken;
         uint256 solverBond;
         uint64 committedAt;
         uint64 revealedAt;
@@ -100,6 +102,8 @@ contract BountyManager is Ownable, ReentrancyGuard {
 
     uint256 public solverBond;
     uint16 public verifierRewardBps;
+    mapping(address paymentToken => bool accepted) public acceptedPaymentToken;
+    mapping(address paymentToken => uint256 bondAmount) public solverBondForToken;
 
     uint256 public nextBountyId = 1;
     mapping(uint256 bountyId => uint256 submissionId) public finalizedWinningSubmissionId;
@@ -117,8 +121,9 @@ contract BountyManager is Ownable, ReentrancyGuard {
     event BountyCreated(
         uint256 indexed bountyId,
         address indexed issuer,
+        address indexed paymentToken,
         string instanceCID,
-        bytes32 indexed instanceDigest,
+        bytes32 instanceDigest,
         string metadataURI,
         bytes32 metadataDigest,
         uint256 reward,
@@ -152,15 +157,40 @@ contract BountyManager is Ownable, ReentrancyGuard {
     event BountyReopened(
         uint256 indexed bountyId, uint64 commitDeadline, uint64 revealDeadline, uint64 verificationDeadline
     );
-    event RewardPaid(uint256 indexed bountyId, uint256 indexed submissionId, address indexed solver, uint256 reward);
-    event VerifierRewardPaid(
-        uint256 indexed bountyId, uint256 indexed submissionId, address indexed verifier, uint256 amount
+    event RewardPaid(
+        uint256 indexed bountyId,
+        uint256 indexed submissionId,
+        address indexed solver,
+        address paymentToken,
+        uint256 reward
     );
-    event VerifierRewardRefunded(uint256 indexed bountyId, address indexed issuer, uint256 amount);
-    event BondRefunded(uint256 indexed bountyId, uint256 indexed submissionId, address indexed solver, uint256 amount);
-    event BondSlashed(uint256 indexed bountyId, uint256 indexed submissionId, address indexed solver, uint256 amount);
-    event FeeRouted(uint256 indexed bountyId, uint256 amount);
+    event VerifierRewardPaid(
+        uint256 indexed bountyId,
+        uint256 indexed submissionId,
+        address indexed verifier,
+        address paymentToken,
+        uint256 amount
+    );
+    event VerifierRewardRefunded(
+        uint256 indexed bountyId, address indexed issuer, address paymentToken, uint256 amount
+    );
+    event BondRefunded(
+        uint256 indexed bountyId,
+        uint256 indexed submissionId,
+        address indexed solver,
+        address bondToken,
+        uint256 amount
+    );
+    event BondSlashed(
+        uint256 indexed bountyId,
+        uint256 indexed submissionId,
+        address indexed solver,
+        address bondToken,
+        uint256 amount
+    );
+    event FeeRouted(uint256 indexed bountyId, address indexed paymentToken, uint256 amount);
     event ProtocolParamsUpdated(uint256 solverBond);
+    event PaymentTokenConfigured(address indexed paymentToken, bool accepted, uint256 solverBond);
     event VerifierRewardBpsUpdated(uint16 verifierRewardBps);
     event VerifierRegistryUpdated(address indexed verifierRegistry);
     event TreasuryRouterUpdated(address indexed treasuryRouter);
@@ -195,8 +225,7 @@ contract BountyManager is Ownable, ReentrancyGuard {
         if (
             address(token_) == address(0) || address(verifierRegistry_) == address(0)
                 || address(treasuryRouter_) == address(0) || solverBond_ == 0
-                || address(verifierRegistry_.token()) != address(token_)
-                || address(treasuryRouter_.token()) != address(token_) || verifierRewardBps_ > MAX_VERIFIER_REWARD_BPS
+                || address(verifierRegistry_.token()) != address(token_) || verifierRewardBps_ > MAX_VERIFIER_REWARD_BPS
         ) {
             revert InvalidProtocolConfig();
         }
@@ -204,10 +233,13 @@ contract BountyManager is Ownable, ReentrancyGuard {
         verifierRegistry = verifierRegistry_;
         treasuryRouter = treasuryRouter_;
         solverBond = solverBond_;
+        acceptedPaymentToken[address(token_)] = true;
+        solverBondForToken[address(token_)] = solverBond_;
         verifierRewardBps = verifierRewardBps_;
     }
 
     function createBounty(
+        address paymentToken,
         string calldata instanceCID,
         bytes32 instanceDigest,
         string calldata metadataURI,
@@ -220,7 +252,8 @@ contract BountyManager is Ownable, ReentrancyGuard {
         uint16 verifierQuorum
     ) external nonReentrant returns (uint256 bountyId) {
         if (
-            bytes(instanceCID).length == 0 || instanceDigest == bytes32(0) || bytes(metadataURI).length == 0
+            paymentToken == address(0) || !acceptedPaymentToken[paymentToken] || solverBondForToken[paymentToken] == 0
+                || bytes(instanceCID).length == 0 || instanceDigest == bytes32(0) || bytes(metadataURI).length == 0
                 || metadataDigest == bytes32(0) || reward == 0 || commitWindow == 0 || revealWindow == 0
                 || verificationWindow == 0 || verifierQuorum == 0
         ) {
@@ -238,6 +271,7 @@ contract BountyManager is Ownable, ReentrancyGuard {
 
         bounties[bountyId] = Bounty({
             issuer: msg.sender,
+            paymentToken: paymentToken,
             instanceCID: instanceCID,
             instanceDigest: instanceDigest,
             metadataURI: metadataURI,
@@ -255,11 +289,12 @@ contract BountyManager is Ownable, ReentrancyGuard {
             postingFeeRouted: false
         });
 
-        token.safeTransferFrom(msg.sender, address(this), reward + verifierRewardPool + postingFee);
+        IERC20(paymentToken).safeTransferFrom(msg.sender, address(this), reward + verifierRewardPool + postingFee);
 
         emit BountyCreated(
             bountyId,
             msg.sender,
+            paymentToken,
             instanceCID,
             instanceDigest,
             metadataURI,
@@ -290,6 +325,7 @@ contract BountyManager is Ownable, ReentrancyGuard {
         }
 
         submissionId = ++bounty.submissionCount;
+        uint256 bondAmount = solverBondForToken[bounty.paymentToken];
         submissions[bountyId][submissionId] = Submission({
             solver: msg.sender,
             commitHash: commitHash,
@@ -297,7 +333,8 @@ contract BountyManager is Ownable, ReentrancyGuard {
             solutionDigest: bytes32(0),
             solutionKind: SolutionKind.None,
             proofFormat: ProofFormat.None,
-            solverBond: solverBond,
+            bondToken: bounty.paymentToken,
+            solverBond: bondAmount,
             committedAt: uint64(block.timestamp),
             revealedAt: 0,
             quorumReachedAt: 0,
@@ -308,7 +345,7 @@ contract BountyManager is Ownable, ReentrancyGuard {
             state: SubmissionState.Committed
         });
 
-        token.safeTransferFrom(msg.sender, address(this), solverBond);
+        IERC20(bounty.paymentToken).safeTransferFrom(msg.sender, address(this), bondAmount);
         activeSubmissionId[bountyId] = submissionId;
         bounty.commitDeadline = uint64(block.timestamp);
         bounty.revealDeadline = uint64(block.timestamp) + bountyRevealWindow[bountyId];
@@ -345,7 +382,8 @@ contract BountyManager is Ownable, ReentrancyGuard {
             revert InvalidReveal();
         }
 
-        bytes32 expected = computeCommitHash(bountyId, msg.sender, solutionKind, proofFormat, solutionRef, solutionDigest, salt);
+        bytes32 expected =
+            computeCommitHash(bountyId, msg.sender, solutionKind, proofFormat, solutionRef, solutionDigest, salt);
         if (expected != submission.commitHash) {
             submission.state = SubmissionState.Invalid;
             _slashSolverBondToRouter(bountyId, submissionId, submission);
@@ -361,7 +399,9 @@ contract BountyManager is Ownable, ReentrancyGuard {
         submission.state = SubmissionState.Revealed;
         bounty.revealDeadline = uint64(block.timestamp);
         bounty.verificationDeadline = uint64(block.timestamp) + bountyVerificationWindow[bountyId];
-        emit SolutionRevealed(bountyId, submissionId, msg.sender, solutionRef, solutionDigest, solutionKind, proofFormat);
+        emit SolutionRevealed(
+            bountyId, submissionId, msg.sender, solutionRef, solutionDigest, solutionKind, proofFormat
+        );
     }
 
     function slashExpiredSubmission(uint256 bountyId, uint256 submissionId)
@@ -470,7 +510,7 @@ contract BountyManager is Ownable, ReentrancyGuard {
             bounty.finalized = true;
             _routePostingFee(bountyId, bounty);
             _refundVerifierRewardPool(bountyId, bounty);
-            token.safeTransfer(bounty.issuer, bounty.reward);
+            IERC20(bounty.paymentToken).safeTransfer(bounty.issuer, bounty.reward);
             emit Finalized(bountyId, 0, false);
             return;
         }
@@ -484,19 +524,19 @@ contract BountyManager is Ownable, ReentrancyGuard {
         } else {
             _refundVerifierRewardPool(bountyId, bounty);
         }
-        token.safeTransfer(settlement.rewardRecipient, bounty.reward);
+        IERC20(bounty.paymentToken).safeTransfer(settlement.rewardRecipient, bounty.reward);
         if (settlement.solverWon) {
             finalizedWinningSubmissionId[bountyId] = submissionId;
             finalizedWinningSolver[bountyId] = submission.solver;
-            emit RewardPaid(bountyId, submissionId, submission.solver, bounty.reward);
+            emit RewardPaid(bountyId, submissionId, submission.solver, bounty.paymentToken, bounty.reward);
         }
         if (settlement.bondRefund != 0) {
-            token.safeTransfer(submission.solver, settlement.bondRefund);
-            emit BondRefunded(bountyId, submissionId, submission.solver, settlement.bondRefund);
+            IERC20(submission.bondToken).safeTransfer(submission.solver, settlement.bondRefund);
+            emit BondRefunded(bountyId, submissionId, submission.solver, submission.bondToken, settlement.bondRefund);
         }
         if (settlement.solverSlash != 0) {
-            _routeSlashRemainder(settlement.solverSlash);
-            emit BondSlashed(bountyId, submissionId, submission.solver, settlement.solverSlash);
+            _routeSlashRemainder(submission.bondToken, settlement.solverSlash);
+            emit BondSlashed(bountyId, submissionId, submission.solver, submission.bondToken, settlement.solverSlash);
         }
         emit Finalized(bountyId, submissionId, settlement.solverWon);
     }
@@ -532,7 +572,20 @@ contract BountyManager is Ownable, ReentrancyGuard {
             revert InvalidProtocolConfig();
         }
         solverBond = solverBond_;
+        solverBondForToken[address(token)] = solverBond_;
         emit ProtocolParamsUpdated(solverBond_);
+    }
+
+    function setPaymentTokenConfig(address paymentToken, bool accepted, uint256 solverBond_) external onlyOwner {
+        if (paymentToken == address(0) || (accepted && solverBond_ == 0)) {
+            revert InvalidProtocolConfig();
+        }
+        acceptedPaymentToken[paymentToken] = accepted;
+        solverBondForToken[paymentToken] = solverBond_;
+        if (paymentToken == address(token)) {
+            solverBond = solverBond_;
+        }
+        emit PaymentTokenConfigured(paymentToken, accepted, solverBond_);
     }
 
     function setVerifierRewardBps(uint16 verifierRewardBps_) external onlyOwner {
@@ -555,7 +608,7 @@ contract BountyManager is Ownable, ReentrancyGuard {
     }
 
     function setTreasuryRouter(TreasuryRouter treasuryRouter_) external onlyOwner {
-        if (address(treasuryRouter_) == address(0) || address(treasuryRouter_.token()) != address(token)) {
+        if (address(treasuryRouter_) == address(0)) {
             revert InvalidProtocolConfig();
         }
         treasuryRouter = treasuryRouter_;
@@ -583,7 +636,9 @@ contract BountyManager is Ownable, ReentrancyGuard {
         bytes32 solutionDigest,
         bytes32 salt
     ) public pure returns (bytes32) {
-        return keccak256(abi.encodePacked(bountyId, solver, solutionKind, proofFormat, solutionRef, solutionDigest, salt));
+        return keccak256(
+            abi.encodePacked(bountyId, solver, solutionKind, proofFormat, solutionRef, solutionDigest, salt)
+        );
     }
 
     function verifierRewardPoolFor(uint256 reward) public view returns (uint256) {
@@ -761,8 +816,8 @@ contract BountyManager is Ownable, ReentrancyGuard {
     function _refundSolverBond(uint256 bountyId, uint256 submissionId, Submission storage submission) internal {
         uint256 amount = _takeSolverBond(bountyId, submissionId, submission);
         if (amount != 0) {
-            token.safeTransfer(submission.solver, amount);
-            emit BondRefunded(bountyId, submissionId, submission.solver, amount);
+            IERC20(submission.bondToken).safeTransfer(submission.solver, amount);
+            emit BondRefunded(bountyId, submissionId, submission.solver, submission.bondToken, amount);
         }
     }
 
@@ -773,8 +828,8 @@ contract BountyManager is Ownable, ReentrancyGuard {
         amount = _takeSolverBond(bountyId, submissionId, submission);
         if (amount != 0) {
             submission.bondSlashed = true;
-            _routeSlashRemainder(amount);
-            emit BondSlashed(bountyId, submissionId, submission.solver, amount);
+            _routeSlashRemainder(submission.bondToken, amount);
+            emit BondSlashed(bountyId, submissionId, submission.solver, submission.bondToken, amount);
         }
     }
 
@@ -791,9 +846,9 @@ contract BountyManager is Ownable, ReentrancyGuard {
             return;
         }
         bounty.postingFeeRouted = true;
-        token.safeTransfer(address(treasuryRouter), bounty.postingFee);
-        treasuryRouter.routePostingFee(bounty.postingFee);
-        emit FeeRouted(bountyId, bounty.postingFee);
+        IERC20(bounty.paymentToken).safeTransfer(address(treasuryRouter), bounty.postingFee);
+        treasuryRouter.routePostingFee(bounty.paymentToken, bounty.postingFee);
+        emit FeeRouted(bountyId, bounty.paymentToken, bounty.postingFee);
     }
 
     function _payWinningVerifierRewards(uint256 bountyId, uint256 submissionId, Bounty storage bounty) internal {
@@ -820,31 +875,31 @@ contract BountyManager is Ownable, ReentrancyGuard {
         if (share != 0) {
             for (uint256 i = 0; i < votes.length; i++) {
                 if (votes[i].support) {
-                    token.safeTransfer(votes[i].verifier, share);
-                    emit VerifierRewardPaid(bountyId, submissionId, votes[i].verifier, share);
+                    IERC20(bounty.paymentToken).safeTransfer(votes[i].verifier, share);
+                    emit VerifierRewardPaid(bountyId, submissionId, votes[i].verifier, bounty.paymentToken, share);
                 }
             }
         }
 
         uint256 remainder = pool - paid;
         if (remainder != 0) {
-            token.safeTransfer(bounty.issuer, remainder);
-            emit VerifierRewardRefunded(bountyId, bounty.issuer, remainder);
+            IERC20(bounty.paymentToken).safeTransfer(bounty.issuer, remainder);
+            emit VerifierRewardRefunded(bountyId, bounty.issuer, bounty.paymentToken, remainder);
         }
     }
 
     function _refundVerifierRewardPool(uint256 bountyId, Bounty storage bounty) internal {
         if (bounty.verifierRewardPool != 0) {
-            token.safeTransfer(bounty.issuer, bounty.verifierRewardPool);
-            emit VerifierRewardRefunded(bountyId, bounty.issuer, bounty.verifierRewardPool);
+            IERC20(bounty.paymentToken).safeTransfer(bounty.issuer, bounty.verifierRewardPool);
+            emit VerifierRewardRefunded(bountyId, bounty.issuer, bounty.paymentToken, bounty.verifierRewardPool);
         }
     }
 
-    function _routeSlashRemainder(uint256 amount) internal {
+    function _routeSlashRemainder(address paymentToken, uint256 amount) internal {
         if (amount == 0) {
             return;
         }
-        token.safeTransfer(address(treasuryRouter), amount);
-        treasuryRouter.routeSlashRemainder(amount);
+        IERC20(paymentToken).safeTransfer(address(treasuryRouter), amount);
+        treasuryRouter.routeSlashRemainder(paymentToken, amount);
     }
 }

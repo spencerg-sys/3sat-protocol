@@ -13,7 +13,7 @@ The protocol lets an issuer escrow a token-denominated bounty for a SAT/CNF inst
 - Verifiers stake `3SAT`, check revealed submissions, and attest accept or reject.
 - Accepted submissions can be finalized by protocol automation or any eligible caller.
 - Finalized answers can be made available through paid artifact access.
-- Protocol fees can be routed between burn and treasury.
+- Protocol fees can be routed per payment asset, for example USDC fully to treasury and `3SAT` between burn and treasury.
 
 The web application, indexer, storage service, solver clients, and verifier clients are separate from this contract repository.
 
@@ -36,7 +36,6 @@ The web application, indexer, storage service, solver clients, and verifier clie
 - `VerifierRegistry`: verifier staking, eligibility, unbonding, disablement, and authorized slashing.
 - `BountyManager`: bounty escrow, solver commit-reveal, solver bonds, verifier attestations, quorum, finalization, and reward accounting.
 - `ArtifactAccessController`: paid access rights for finalized solution artifacts.
-- `ProtocolTimelock`: optional OpenZeppelin timelock wrapper for future governance ownership.
 
 ## Token Allocation
 
@@ -45,7 +44,7 @@ The web application, indexer, storage service, solver clients, and verifier clie
 | Allocation | Share | Recipient |
 | --- | ---: | --- |
 | Community incentives | 35% | `CommunityIncentivesController` |
-| Treasury / DAO reserve | 20% | `TreasuryReserveController` |
+| Treasury reserve | 20% | `TreasuryReserveController` |
 | Team & contributors | 15% | `TokenVesting` |
 | Investors / strategic partners | 25% | `TokenVesting` |
 | Liquidity / market making | 5% | liquidity address or manager |
@@ -54,7 +53,7 @@ Unlocks transfer already-minted tokens from holder/controller contracts. Unlocks
 
 ## Current Protocol Parameters
 
-The table below reflects the current reference configuration used by the protocol contracts. Governance-controlled values can be changed by the contract owner or future governance owner after deployment.
+The table below reflects the current reference configuration used by the protocol contracts. Owner-controlled values can be changed by the protocol owner after deployment, preferably through the project Safe/multisig for production operations.
 
 ### Token Parameters
 
@@ -71,6 +70,7 @@ These are set per bounty by the issuer when a bounty is created.
 
 | Parameter | Meaning |
 | --- | --- |
+| Payment asset | ERC-20 token selected by the issuer for this bounty, currently `USDC` or `3SAT` |
 | Reward | Main bounty reward escrowed for the winning solver |
 | Commit window | Time available for solvers to commit solution hashes |
 | Reveal window | Time available for committed solvers to reveal solution references and digests |
@@ -79,35 +79,37 @@ These are set per bounty by the issuer when a bounty is created.
 
 The protocol uses stage-based timing: commit, reveal, and verification windows are sequential phases.
 
-### Governance-Controlled Parameters
+### Owner-Controlled Parameters
 
 | Parameter | Current reference value | Contract | Notes |
 | --- | ---: | --- | --- |
 | Verifier minimum stake | `1,000 3SAT` | `VerifierRegistry` | Required for verifier eligibility |
 | Verifier unbonding delay | `15 days` | `VerifierRegistry` | Delay before requested unstake can be withdrawn |
 | Official verifier slash | `50%` | `VerifierRegistry` | Owner-authorized slash also disables the verifier |
-| Solver bond | `10 3SAT` | `BountyManager` | Bond posted when committing a solution |
-| Verifier reward pool | `2%` of bounty reward | `BountyManager` | Reserved from issuer escrow and split among correct accepting verifiers |
+| Accepted bounty payment assets | `USDC`, `3SAT` | `BountyManager` | The owner can enable or disable ERC-20 payment assets for new bounties |
+| Solver bond | `10` units of the bounty payment asset | `BountyManager` | Configured per payment asset and posted when committing a solution |
+| Verifier reward pool | `2%` of bounty reward | `BountyManager` | Paid in the bounty payment asset and split among correct accepting verifiers |
 | Max verifier reward pool | `10%` of bounty reward | `BountyManager` | Contract-level cap |
-| Treasury burn share | `20%` of routed fees | `TreasuryRouter` | Remaining routed amount goes to treasury |
-| Default solver access reward | `1%` of bounty reward | `ArtifactAccessController` | Target amount paid to the winning solver per answer access purchase |
+| Treasury burn share | per token | `TreasuryRouter` | Reference routing is `0%` burn for USDC and `20%` burn for `3SAT` routed fees |
+| Default answer access asset | bounty payment asset | `ArtifactAccessController` | By default, answer downloads settle in the same ERC-20 asset as the bounty reward |
+| Default solver access reward | `1%` of bounty reward | `ArtifactAccessController` | Target amount paid to the winning solver per answer access purchase, denominated in the bounty payment asset by default |
 | Max default solver access reward | `10%` of bounty reward | `ArtifactAccessController` | Contract-level cap |
 | Solver royalty share of access fee | `50%` | `ArtifactAccessController` | Remaining access fee is routed through `TreasuryRouter` |
 | Max solver royalty share | `50%` | `ArtifactAccessController` | Contract-level cap |
 
 ### Answer Access Economics
 
-With the current reference settings, paid answer download works as follows:
+With the current reference settings, paid answer download uses the same payment asset as the bounty. A USDC bounty has USDC reward, solver payout, verifier reward pool, solver bond, and answer access fee. A `3SAT` bounty has the same flows in `3SAT`. The owner can later change accepted payment-asset policy and custom access pricing without redeploying the core contracts.
 
 | Flow | Amount |
 | --- | ---: |
-| User pays to access a finalized answer | `2%` of bounty reward |
-| Winning solver receives | `1%` of bounty reward |
-| Routed through `TreasuryRouter` | `1%` of bounty reward |
-| Burned from routed amount | `20%` |
-| Sent to treasury from routed amount | `80%` |
+| User pays to access a finalized answer | default target is `2%` of bounty reward, in the bounty payment asset |
+| Winning solver receives | default target is `1%` of bounty reward, in the bounty payment asset |
+| Routed through `TreasuryRouter` | default target is `1%` of bounty reward, in the bounty payment asset |
+| USDC treasury routing | `100%` of routed amount to treasury |
+| `3SAT` treasury routing | `20%` burn, `80%` treasury |
 
-In effect, a paid finalized-answer download sends `1%` of the bounty reward to the winning solver, burns `0.2%`, and sends `0.8%` to treasury.
+In effect, a paid USDC finalized-answer download sends the solver royalty to the winning solver and sends the routed company revenue to treasury. A paid `3SAT` finalized-answer download sends the solver royalty to the winning solver and can continue to support burn plus treasury routing.
 
 Issuer access to the finalized winning answer is free.
 

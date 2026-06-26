@@ -10,7 +10,7 @@ Security-critical state is on-chain:
 - Vesting and controller release caps.
 - Bounty escrow accounting.
 - Solver bonds.
-- Verifier staking, eligibility, unbonding, slashing, and governance disablement.
+- Verifier staking, eligibility, unbonding, slashing, and owner-authorized disablement.
 - Attestation quorum.
 - Finalization readiness and settlement.
 - Artifact access payment accounting.
@@ -20,8 +20,8 @@ The API/server layer is untrusted and non-custodial by default. It may prepare c
 
 ## Main Risks
 
-- Parameter risk: `S_MAX`, verifier stake, solver bond, verifier reward bps, artifact access pricing, routing bps, and time windows must be reviewed before production.
-- Governance risk: owner powers must move to Safe multisig and/or timelock before production.
+- Parameter risk: `S_MAX`, accepted payment assets, verifier stake, solver bond per payment asset, verifier reward bps, artifact access pricing, routing bps, and time windows must be reviewed before production.
+- Owner risk: protocol owner powers should be held by a reviewed project-controlled account or Safe multisig before production.
 - Verifier quality risk: verifier clients and operator policies must reduce false accept/reject attestations.
 - Automation risk: keeper and indexer infrastructure must be monitored because finalization is permissionless but not self-executing.
 - Gas risk: bounty systems with many submissions or attestations need production gas review.
@@ -63,7 +63,7 @@ The API/server layer is untrusted and non-custodial by default. It may prepare c
 - Harden verifier client releases with checksums, signed builds, and reproducible release notes.
 - Consider encrypted artifact support for enterprise SAT workloads.
 - Consider IPFS or other decentralized mirrors for public finalized research artifacts.
-- Consider pausable emergency controls only if governance accepts the centralization tradeoff.
+- Consider pausable emergency controls only if the project accepts the centralization tradeoff.
 
 ## Audit Checklist
 
@@ -76,4 +76,4 @@ The API/server layer is untrusted and non-custodial by default. It may prepare c
 - Verifier reward pool payout/refund accounting.
 - Artifact access price and royalty distribution.
 - Treasury/burn routing.
-- Governance role transfer and timelock configuration.
+- Owner role transfer and emergency authority configuration.

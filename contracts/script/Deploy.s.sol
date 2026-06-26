@@ -16,11 +16,12 @@ contract Deploy is Script {
     uint256 internal constant BPS_DENOMINATOR = 10_000;
     uint256 internal constant ETHEREUM_MAINNET_CHAIN_ID = 1;
     uint256 internal constant ARBITRUM_ONE_CHAIN_ID = 42_161;
+    address internal constant ARBITRUM_SEPOLIA_USDC = 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d;
+    address internal constant ARBITRUM_ONE_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
     uint64 internal constant MONTH = 30 days;
 
     error InvalidDeploymentConfig();
     error ProductionDeploymentNotApproved();
-    error ProductionGovernanceAddressMustBeContract();
 
     struct Deployed {
         SATToken token;
@@ -48,6 +49,8 @@ contract Deploy is Script {
         uint256 verifierMinimumStake = vm.envOr("VERIFIER_MINIMUM_STAKE", uint256(1_000 ether));
         uint256 verifierUnbondingDelayRaw = vm.envOr("VERIFIER_UNBONDING_DELAY", uint256(15 days));
         uint256 solverBond = vm.envOr("SOLVER_BOND", uint256(10 ether));
+        address usdcAddress = vm.envOr("USDC_ADDRESS", _defaultUsdcAddress(block.chainid));
+        uint256 usdcSolverBond = vm.envOr("USDC_SOLVER_BOND", uint256(10_000_000));
         uint256 verifierRewardBpsRaw = vm.envOr("VERIFIER_REWARD_BPS", uint256(200));
         uint256 treasuryBurnBpsRaw = vm.envOr("TREASURY_BURN_BPS", uint256(2_000));
         uint256 defaultSolverAccessRewardBpsRaw = vm.envOr("DEFAULT_SOLVER_ACCESS_REWARD_BPS", uint256(100));
@@ -64,6 +67,8 @@ contract Deploy is Script {
             verifierMinimumStake,
             verifierUnbondingDelayRaw,
             solverBond,
+            usdcAddress,
+            usdcSolverBond,
             verifierRewardBpsRaw,
             treasuryBurnBpsRaw,
             defaultSolverAccessRewardBpsRaw,
@@ -99,20 +104,28 @@ contract Deploy is Script {
             new TokenVesting(deployed.token, investorBeneficiary, genesis, 6 * MONTH, 24 * MONTH, investorAllocation);
         deployed.community = new CommunityIncentivesController(deployed.token, maxSupply, genesis, deploymentOwner);
         deployed.reserve = new TreasuryReserveController(deployed.token, maxSupply, genesis, treasury, deploymentOwner);
-        deployed.router = new TreasuryRouter(deployed.token, treasury, treasuryBurnBps, deploymentOwner);
+        deployed.router = new TreasuryRouter(treasury, deploymentOwner);
+        deployed.router.setTokenRouting(address(deployed.token), treasuryBurnBps);
         deployed.registry =
             new VerifierRegistry(deployed.token, verifierMinimumStake, verifierUnbondingDelay, deploymentOwner);
         deployed.manager = new BountyManager(
             deployed.token, deployed.registry, deployed.router, solverBond, verifierRewardBps, deploymentOwner
         );
+        if (usdcAddress != address(0)) {
+            deployed.router.setTokenRouting(usdcAddress, 0);
+            deployed.manager.setPaymentTokenConfig(usdcAddress, true, usdcSolverBond);
+        }
         deployed.accessController = new ArtifactAccessController(
-            deployed.token,
             IBountyManagerAccessView(address(deployed.manager)),
             deployed.router,
+            usdcAddress == address(0) ? address(deployed.token) : usdcAddress,
             defaultSolverAccessRewardBps,
             solverRoyaltyBps,
             deploymentOwner
         );
+        if (usdcAddress != address(0)) {
+            deployed.accessController.setPaymentTokenConfig(address(deployed.token), true);
+        }
 
         deployed.registry.setBountyManager(address(deployed.manager));
         deployed.token
@@ -136,7 +149,7 @@ contract Deploy is Script {
 
         vm.stopBroadcast();
 
-        _writeDeploymentJson(deployed, ownerAddress, treasury, liquidityAddress);
+        _writeDeploymentJson(deployed, ownerAddress, treasury, liquidityAddress, usdcAddress);
         console2.log("3SAT Protocol v1 deployment prepared for chain", block.chainid);
         console2.log("SATToken", address(deployed.token));
         console2.log("BountyManager", address(deployed.manager));
@@ -154,6 +167,8 @@ contract Deploy is Script {
         uint256 verifierMinimumStake,
         uint256 verifierUnbondingDelayRaw,
         uint256 solverBond,
+        address usdcAddress,
+        uint256 usdcSolverBond,
         uint256 verifierRewardBpsRaw,
         uint256 treasuryBurnBpsRaw,
         uint256 defaultSolverAccessRewardBpsRaw,
@@ -164,7 +179,8 @@ contract Deploy is Script {
                 || treasury == address(0) || teamBeneficiary == address(0) || investorBeneficiary == address(0)
                 || liquidityAddress == address(0) || ownerAddress == address(0) || verifierMinimumStake == 0
                 || verifierUnbondingDelayRaw == 0 || verifierUnbondingDelayRaw > type(uint64).max || solverBond == 0
-                || verifierRewardBpsRaw > 1_000 || treasuryBurnBpsRaw > BPS_DENOMINATOR || solverRoyaltyBpsRaw > 5_000
+                || (usdcAddress != address(0) && usdcSolverBond == 0) || verifierRewardBpsRaw > 1_000
+                || treasuryBurnBpsRaw > BPS_DENOMINATOR || solverRoyaltyBpsRaw > 5_000
                 || defaultSolverAccessRewardBpsRaw > 1_000
                 || (defaultSolverAccessRewardBpsRaw != 0 && solverRoyaltyBpsRaw == 0)
         ) {
@@ -175,14 +191,21 @@ contract Deploy is Script {
             if (!vm.envOr("PRODUCTION_DEPLOYMENT_APPROVED", false)) {
                 revert ProductionDeploymentNotApproved();
             }
-            if (ownerAddress.code.length == 0 || communityProgramOwner.code.length == 0 || treasury.code.length == 0) {
-                revert ProductionGovernanceAddressMustBeContract();
-            }
         }
     }
 
     function _isProductionChain(uint256 chainId) internal pure returns (bool) {
         return chainId == ETHEREUM_MAINNET_CHAIN_ID || chainId == ARBITRUM_ONE_CHAIN_ID;
+    }
+
+    function _defaultUsdcAddress(uint256 chainId) internal pure returns (address) {
+        if (chainId == 421_614) {
+            return ARBITRUM_SEPOLIA_USDC;
+        }
+        if (chainId == ARBITRUM_ONE_CHAIN_ID) {
+            return ARBITRUM_ONE_USDC;
+        }
+        return address(0);
     }
 
     function _validateAllocations(Deployed memory deployed, uint256 maxSupply, address liquidityAddress) internal view {
@@ -198,7 +221,8 @@ contract Deploy is Script {
         Deployed memory deployed,
         address ownerAddress,
         address treasuryAddress,
-        address liquidityAddress
+        address liquidityAddress,
+        address usdcAddress
     ) internal {
         vm.createDir("deployments", true);
         string memory object = "deployment";
@@ -212,6 +236,7 @@ contract Deploy is Script {
         vm.serializeAddress(object, "VerifierRegistry", address(deployed.registry));
         vm.serializeAddress(object, "BountyManager", address(deployed.manager));
         vm.serializeAddress(object, "ArtifactAccessController", address(deployed.accessController));
+        vm.serializeAddress(object, "USDC", usdcAddress);
         vm.serializeAddress(object, "OWNER_ADDRESS", ownerAddress);
         vm.serializeAddress(object, "TREASURY_ADDRESS", treasuryAddress);
         string memory json = vm.serializeAddress(object, "LIQUIDITY_ADDRESS", liquidityAddress);

@@ -11,6 +11,7 @@ import { TreasuryRouter } from "./TreasuryRouter.sol";
 interface IBountyManagerAccessView {
     struct Bounty {
         address issuer;
+        address paymentToken;
         string instanceCID;
         bytes32 instanceDigest;
         string metadataURI;
@@ -46,9 +47,10 @@ contract ArtifactAccessController is Ownable, ReentrancyGuard {
     uint8 public constant ARTIFACT_SOLUTION = 2;
     uint8 public constant ARTIFACT_EVIDENCE = 3;
 
-    IERC20 public immutable token;
     IBountyManagerAccessView public bountyManager;
     TreasuryRouter public treasuryRouter;
+    address public defaultPaymentToken;
+    bool public defaultAccessUsesBountyPaymentToken;
     uint16 public defaultSolverAccessRewardBps;
     uint16 public solverRoyaltyBps;
 
@@ -58,16 +60,28 @@ contract ArtifactAccessController is Ownable, ReentrancyGuard {
     }
 
     mapping(uint8 artifactType => bool enabled) public artifactTypeEnabled;
-    mapping(uint256 bountyId => mapping(uint8 artifactType => PriceConfig)) private customAccessPrices;
+    mapping(address paymentToken => bool accepted) public acceptedPaymentToken;
+    mapping(uint256 bountyId => mapping(uint8 artifactType => mapping(address paymentToken => PriceConfig))) private
+        customAccessPrices;
     mapping(address user => mapping(uint256 bountyId => mapping(uint8 artifactType => bool))) private purchasedAccess;
 
-    event AccessPurchased(address indexed user, uint256 indexed bountyId, uint8 indexed artifactType, uint256 price);
+    event AccessPurchased(
+        address indexed user, uint256 indexed bountyId, uint8 indexed artifactType, address paymentToken, uint256 price
+    );
     event AccessFeeDistributed(
-        uint256 indexed bountyId, uint8 indexed artifactType, address solver, uint256 solverAmount, uint256 routedAmount
+        uint256 indexed bountyId,
+        uint8 indexed artifactType,
+        address paymentToken,
+        address solver,
+        uint256 solverAmount,
+        uint256 routedAmount
     );
     event AccessGranted(address indexed user, uint256 indexed bountyId, uint8 indexed artifactType);
+    event PaymentTokenConfigured(address indexed paymentToken, bool accepted);
+    event DefaultPaymentTokenUpdated(address indexed paymentToken);
+    event DefaultAccessPaymentPolicyUpdated(bool usesBountyPaymentToken);
     event DefaultSolverAccessRewardBpsUpdated(uint16 rewardBps);
-    event AccessPriceUpdated(uint256 indexed bountyId, uint8 indexed artifactType, uint256 price);
+    event AccessPriceUpdated(uint256 indexed bountyId, uint8 indexed artifactType, address paymentToken, uint256 price);
     event ArtifactTypeEnabled(uint8 indexed artifactType, bool enabled);
     event BountyManagerUpdated(address indexed bountyManager);
     event TreasuryRouterUpdated(address indexed treasuryRouter);
@@ -81,16 +95,16 @@ contract ArtifactAccessController is Ownable, ReentrancyGuard {
     error ArtifactTypeDisabled();
 
     constructor(
-        IERC20 token_,
         IBountyManagerAccessView bountyManager_,
         TreasuryRouter treasuryRouter_,
+        address defaultPaymentToken_,
         uint16 defaultSolverAccessRewardBps_,
         uint16 solverRoyaltyBps_,
         address initialOwner
     ) Ownable(initialOwner) {
         if (
-            address(token_) == address(0) || address(bountyManager_) == address(0)
-                || address(treasuryRouter_) == address(0)
+            address(bountyManager_) == address(0) || address(treasuryRouter_) == address(0)
+                || defaultPaymentToken_ == address(0)
                 || defaultSolverAccessRewardBps_ > MAX_DEFAULT_SOLVER_ACCESS_REWARD_BPS
                 || solverRoyaltyBps_ > MAX_SOLVER_ROYALTY_BPS || initialOwner == address(0)
                 || (defaultSolverAccessRewardBps_ != 0 && solverRoyaltyBps_ == 0)
@@ -98,9 +112,11 @@ contract ArtifactAccessController is Ownable, ReentrancyGuard {
             revert InvalidAccessConfig();
         }
 
-        token = token_;
         bountyManager = bountyManager_;
         treasuryRouter = treasuryRouter_;
+        defaultPaymentToken = defaultPaymentToken_;
+        defaultAccessUsesBountyPaymentToken = true;
+        acceptedPaymentToken[defaultPaymentToken_] = true;
         defaultSolverAccessRewardBps = defaultSolverAccessRewardBps_;
         solverRoyaltyBps = solverRoyaltyBps_;
         artifactTypeEnabled[ARTIFACT_INSTANCE] = true;
@@ -122,6 +138,27 @@ contract ArtifactAccessController is Ownable, ReentrancyGuard {
         }
         treasuryRouter = treasuryRouter_;
         emit TreasuryRouterUpdated(address(treasuryRouter_));
+    }
+
+    function setPaymentTokenConfig(address paymentToken, bool accepted) external onlyOwner {
+        if (paymentToken == address(0)) {
+            revert InvalidAccessConfig();
+        }
+        acceptedPaymentToken[paymentToken] = accepted;
+        emit PaymentTokenConfigured(paymentToken, accepted);
+    }
+
+    function setDefaultPaymentToken(address paymentToken) external onlyOwner {
+        if (paymentToken == address(0) || !acceptedPaymentToken[paymentToken]) {
+            revert InvalidAccessConfig();
+        }
+        defaultPaymentToken = paymentToken;
+        emit DefaultPaymentTokenUpdated(paymentToken);
+    }
+
+    function setDefaultAccessUsesBountyPaymentToken(bool enabled) external onlyOwner {
+        defaultAccessUsesBountyPaymentToken = enabled;
+        emit DefaultAccessPaymentPolicyUpdated(enabled);
     }
 
     function setDefaultSolverAccessRewardBps(uint16 rewardBps) external onlyOwner {
@@ -147,10 +184,16 @@ contract ArtifactAccessController is Ownable, ReentrancyGuard {
         emit ArtifactTypeEnabled(artifactType, enabled);
     }
 
-    function setAccessPrice(uint256 bountyId, uint8 artifactType, uint256 price) external onlyOwner {
+    function setAccessPrice(uint256 bountyId, uint8 artifactType, address paymentToken, uint256 price)
+        external
+        onlyOwner
+    {
         _requireValidArtifactType(artifactType);
-        customAccessPrices[bountyId][artifactType] = PriceConfig({ set: true, price: price });
-        emit AccessPriceUpdated(bountyId, artifactType, price);
+        if (paymentToken == address(0) || !acceptedPaymentToken[paymentToken]) {
+            revert InvalidAccessConfig();
+        }
+        customAccessPrices[bountyId][artifactType][paymentToken] = PriceConfig({ set: true, price: price });
+        emit AccessPriceUpdated(bountyId, artifactType, paymentToken, price);
     }
 
     function grantAccess(address user, uint256 bountyId, uint8 artifactType) external onlyOwner {
@@ -164,7 +207,25 @@ contract ArtifactAccessController is Ownable, ReentrancyGuard {
     }
 
     function purchaseAccess(uint256 bountyId, uint8 artifactType) external nonReentrant {
+        _purchaseAccess(bountyId, artifactType, _defaultPaymentTokenFor(bountyId, artifactType));
+    }
+
+    function purchaseAccess(uint256 bountyId, uint8 artifactType, address paymentToken) external nonReentrant {
+        _purchaseAccess(bountyId, artifactType, paymentToken);
+    }
+
+    function _purchaseAccess(uint256 bountyId, uint8 artifactType, address paymentToken) internal {
+        if (paymentToken == address(0) || !acceptedPaymentToken[paymentToken]) {
+            revert InvalidAccessConfig();
+        }
         IBountyManagerAccessView.Bounty memory bounty = _requirePurchaseAvailable(bountyId, artifactType);
+
+        if (
+            artifactType == ARTIFACT_SOLUTION && paymentToken != bounty.paymentToken
+                && !customAccessPrices[bountyId][artifactType][paymentToken].set
+        ) {
+            revert InvalidAccessConfig();
+        }
 
         if (purchasedAccess[msg.sender][bountyId][artifactType]) {
             return;
@@ -175,26 +236,34 @@ contract ArtifactAccessController is Ownable, ReentrancyGuard {
             return;
         }
 
-        uint256 price = accessPrice(bountyId, artifactType);
+        uint256 price = accessPrice(bountyId, artifactType, paymentToken);
         if (price != 0) {
-            (, address solver, uint256 solverAmount, uint256 routedAmount) = accessDistribution(bountyId, artifactType);
+            (, address solver, uint256 solverAmount, uint256 routedAmount) =
+                accessDistribution(bountyId, artifactType, paymentToken);
             if (solverAmount != 0) {
-                token.safeTransferFrom(msg.sender, solver, solverAmount);
+                IERC20(paymentToken).safeTransferFrom(msg.sender, solver, solverAmount);
             }
             if (routedAmount != 0) {
-                token.safeTransferFrom(msg.sender, address(treasuryRouter), routedAmount);
-                treasuryRouter.routePostingFee(routedAmount);
+                IERC20(paymentToken).safeTransferFrom(msg.sender, address(treasuryRouter), routedAmount);
+                treasuryRouter.routePostingFee(paymentToken, routedAmount);
             }
-            emit AccessFeeDistributed(bountyId, artifactType, solver, solverAmount, routedAmount);
+            emit AccessFeeDistributed(bountyId, artifactType, paymentToken, solver, solverAmount, routedAmount);
         }
 
         purchasedAccess[msg.sender][bountyId][artifactType] = true;
-        emit AccessPurchased(msg.sender, bountyId, artifactType, price);
+        emit AccessPurchased(msg.sender, bountyId, artifactType, paymentToken, price);
     }
 
     function accessPrice(uint256 bountyId, uint8 artifactType) public view returns (uint256) {
+        return accessPrice(bountyId, artifactType, _defaultPaymentTokenFor(bountyId, artifactType));
+    }
+
+    function accessPrice(uint256 bountyId, uint8 artifactType, address paymentToken) public view returns (uint256) {
         _requireValidArtifactType(artifactType);
-        PriceConfig memory config = customAccessPrices[bountyId][artifactType];
+        if (paymentToken == address(0) || !acceptedPaymentToken[paymentToken]) {
+            return 0;
+        }
+        PriceConfig memory config = customAccessPrices[bountyId][artifactType][paymentToken];
         if (config.set) {
             return config.price;
         }
@@ -202,6 +271,9 @@ contract ArtifactAccessController is Ownable, ReentrancyGuard {
             return 0;
         }
         IBountyManagerAccessView.Bounty memory bounty = _requireKnownBounty(bountyId);
+        if (paymentToken != bounty.paymentToken) {
+            return 0;
+        }
         uint256 targetSolverReward = (bounty.reward * defaultSolverAccessRewardBps) / BPS_DENOMINATOR;
         return _ceilDiv(targetSolverReward * BPS_DENOMINATOR, solverRoyaltyBps);
     }
@@ -211,7 +283,15 @@ contract ArtifactAccessController is Ownable, ReentrancyGuard {
         view
         returns (uint256 price, address solver, uint256 solverAmount, uint256 routedAmount)
     {
-        price = accessPrice(bountyId, artifactType);
+        return accessDistribution(bountyId, artifactType, _defaultPaymentTokenFor(bountyId, artifactType));
+    }
+
+    function accessDistribution(uint256 bountyId, uint8 artifactType, address paymentToken)
+        public
+        view
+        returns (uint256 price, address solver, uint256 solverAmount, uint256 routedAmount)
+    {
+        price = accessPrice(bountyId, artifactType, paymentToken);
         if (artifactType == ARTIFACT_SOLUTION) {
             solver = bountyManager.finalizedWinningSolver(bountyId);
             solverAmount = (price * solverRoyaltyBps) / BPS_DENOMINATOR;
@@ -242,7 +322,19 @@ contract ArtifactAccessController is Ownable, ReentrancyGuard {
         if (hasAccess(user, bountyId, artifactType)) {
             return true;
         }
-        return accessPrice(bountyId, artifactType) == 0;
+        return accessPrice(bountyId, artifactType, bounty.paymentToken) == 0;
+    }
+
+    function _defaultPaymentTokenFor(uint256 bountyId, uint8 artifactType) internal view returns (address) {
+        IBountyManagerAccessView.Bounty memory bounty = _requireKnownBounty(bountyId);
+        if (defaultAccessUsesBountyPaymentToken) {
+            return bounty.paymentToken;
+        }
+        PriceConfig memory config = customAccessPrices[bountyId][artifactType][defaultPaymentToken];
+        if (config.set || defaultPaymentToken == bounty.paymentToken) {
+            return defaultPaymentToken;
+        }
+        return bounty.paymentToken;
     }
 
     function _requirePurchaseAvailable(uint256 bountyId, uint8 artifactType)

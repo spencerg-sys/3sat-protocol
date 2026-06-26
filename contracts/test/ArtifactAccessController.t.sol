@@ -11,6 +11,7 @@ import { TreasuryRouter } from "../src/TreasuryRouter.sol";
 import { VerifierRegistry } from "../src/VerifierRegistry.sol";
 import { BountyManager } from "../src/BountyManager.sol";
 import { ArtifactAccessController, IBountyManagerAccessView } from "../src/ArtifactAccessController.sol";
+import { MockERC20 } from "./mocks/MockERC20.sol";
 
 contract ArtifactAccessControllerTest is Test {
     uint256 internal constant S_MAX = 1_000_000_000 ether;
@@ -33,6 +34,7 @@ contract ArtifactAccessControllerTest is Test {
     address internal verifierB = address(0x445);
 
     SATToken internal token;
+    MockERC20 internal usdc;
     TreasuryRouter internal router;
     VerifierRegistry internal registry;
     BountyManager internal manager;
@@ -45,6 +47,9 @@ contract ArtifactAccessControllerTest is Test {
     uint256 internal reward = 1_000 ether;
     uint256 internal postingFee = 10 ether;
     uint256 internal solverBond = 50 ether;
+    uint256 internal usdcReward = 1_000e6;
+    uint256 internal usdcPostingFee = 10e6;
+    uint256 internal usdcSolverBond = 50e6;
     uint256 internal minimumStake = 100 ether;
     uint16 internal solverRoyaltyBps = 5_000;
 
@@ -52,6 +57,7 @@ contract ArtifactAccessControllerTest is Test {
         vm.warp(GENESIS);
 
         token = new SATToken(S_MAX, owner);
+        usdc = new MockERC20("USD Coin", "USDC", 6);
         TokenVesting teamVesting = new TokenVesting(
             token, address(0x1001), GENESIS, 12 * MONTH, 24 * MONTH, token.allocationAmount(token.TEAM_BPS())
         );
@@ -66,13 +72,19 @@ contract ArtifactAccessControllerTest is Test {
             address(community), address(reserve), address(teamVesting), address(investorVesting), liquidity
         );
 
-        router = new TreasuryRouter(token, treasury, 2_000, owner);
+        router = new TreasuryRouter(treasury, owner);
+        vm.prank(owner);
+        router.setTokenRouting(address(token), 2_000);
+        vm.prank(owner);
+        router.setTokenRouting(address(usdc), 0);
         registry = new VerifierRegistry(token, minimumStake, UNBONDING_DELAY, owner);
         manager = new BountyManager(token, registry, router, solverBond, VERIFIER_REWARD_BPS, owner);
+        vm.prank(owner);
+        manager.setPaymentTokenConfig(address(usdc), true, usdcSolverBond);
         access = new ArtifactAccessController(
-            token,
             IBountyManagerAccessView(address(manager)),
             router,
+            address(token),
             DEFAULT_SOLVER_ACCESS_REWARD_BPS,
             solverRoyaltyBps,
             owner
@@ -86,6 +98,9 @@ contract ArtifactAccessControllerTest is Test {
         _fund(buyer, 2_000 ether);
         _fund(verifierA, 2_000 ether);
         _fund(verifierB, 2_000 ether);
+        usdc.mint(issuer, 20_000e6);
+        usdc.mint(solver, 2_000e6);
+        usdc.mint(buyer, 2_000e6);
 
         _stakeVerifier(verifierA);
         _stakeVerifier(verifierB);
@@ -125,6 +140,76 @@ contract ArtifactAccessControllerTest is Test {
         assertEq(token.balanceOf(solver), solverBefore + 10 ether);
         assertEq(token.balanceOf(treasury), treasuryBefore + 8 ether);
         assertEq(token.totalSupply(), supplyBefore - 2 ether);
+    }
+
+    function testUsdcSolutionAccessRoutesTreasuryShareWithoutBurn() public {
+        vm.startPrank(owner);
+        access.setPaymentTokenConfig(address(usdc), true);
+        access.setDefaultPaymentToken(address(usdc));
+        vm.stopPrank();
+
+        (uint256 bountyId,) = _finalizedUsdcBounty();
+        uint256 solverBefore = usdc.balanceOf(solver);
+        uint256 treasuryBefore = usdc.balanceOf(treasury);
+        uint256 supplyBefore = usdc.totalSupply();
+
+        (uint256 price, address royaltyRecipient, uint256 solverAmount, uint256 routedAmount) =
+            access.accessDistribution(bountyId, access.ARTIFACT_SOLUTION());
+        assertEq(price, 20e6);
+        assertEq(royaltyRecipient, solver);
+        assertEq(solverAmount, 10e6);
+        assertEq(routedAmount, 10e6);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(access), price);
+        access.purchaseAccess(bountyId, access.ARTIFACT_SOLUTION());
+        vm.stopPrank();
+
+        assertTrue(access.hasAccess(buyer, bountyId, access.ARTIFACT_SOLUTION()));
+        assertEq(usdc.balanceOf(solver), solverBefore + 10e6);
+        assertEq(usdc.balanceOf(treasury), treasuryBefore + 10e6);
+        assertEq(usdc.totalSupply(), supplyBefore);
+    }
+
+    function testUnpricedCrossTokenSolutionAccessCannotBePurchased() public {
+        vm.prank(owner);
+        access.setPaymentTokenConfig(address(usdc), true);
+
+        (uint256 bountyId,) = _finalizedBounty();
+        uint8 solutionArtifact = access.ARTIFACT_SOLUTION();
+
+        vm.startPrank(buyer);
+        vm.expectRevert(ArtifactAccessController.InvalidAccessConfig.selector);
+        access.purchaseAccess(bountyId, solutionArtifact, address(usdc));
+        vm.stopPrank();
+
+        vm.prank(owner);
+        access.setAccessPrice(bountyId, solutionArtifact, address(usdc), 20e6);
+
+        vm.startPrank(buyer);
+        usdc.approve(address(access), 20e6);
+        access.purchaseAccess(bountyId, solutionArtifact, address(usdc));
+        vm.stopPrank();
+
+        assertTrue(access.hasAccess(buyer, bountyId, solutionArtifact));
+    }
+
+    function testDefaultAnswerAccessUsesBountyPaymentToken() public {
+        vm.startPrank(owner);
+        access.setPaymentTokenConfig(address(usdc), true);
+        access.setDefaultPaymentToken(address(usdc));
+        vm.stopPrank();
+
+        (uint256 bountyId,) = _finalizedBounty();
+
+        assertEq(access.accessPrice(bountyId, access.ARTIFACT_SOLUTION()), _defaultAccessPrice());
+
+        vm.startPrank(buyer);
+        token.approve(address(access), _defaultAccessPrice());
+        access.purchaseAccess(bountyId, access.ARTIFACT_SOLUTION());
+        vm.stopPrank();
+
+        assertTrue(access.hasAccess(buyer, bountyId, access.ARTIFACT_SOLUTION()));
     }
 
     function testIssuerCanAccessFinalizedSolutionWithoutPayment() public {
@@ -225,7 +310,7 @@ contract ArtifactAccessControllerTest is Test {
         uint8 solutionArtifact = access.ARTIFACT_SOLUTION();
 
         vm.prank(owner);
-        access.setAccessPrice(bountyId, solutionArtifact, 3 ether);
+        access.setAccessPrice(bountyId, solutionArtifact, address(token), 3 ether);
 
         (uint256 price, address royaltyRecipient, uint256 solverAmount, uint256 routedAmount) =
             access.accessDistribution(bountyId, solutionArtifact);
@@ -257,12 +342,32 @@ contract ArtifactAccessControllerTest is Test {
         vm.startPrank(issuer);
         token.approve(address(manager), reward + manager.verifierRewardPoolFor(reward) + postingFee);
         bountyId = manager.createBounty(
+            address(token),
             "r2://3sat-artifacts-dev/instances/question.cnf",
             keccak256("instance"),
             "r2://3sat-artifacts-dev/metadata/question.json",
             keccak256("metadata"),
             reward,
             postingFee,
+            COMMIT_WINDOW,
+            REVEAL_WINDOW,
+            VERIFICATION_WINDOW,
+            2
+        );
+        vm.stopPrank();
+    }
+
+    function _createUsdcBounty() internal returns (uint256 bountyId) {
+        vm.startPrank(issuer);
+        usdc.approve(address(manager), usdcReward + manager.verifierRewardPoolFor(usdcReward) + usdcPostingFee);
+        bountyId = manager.createBounty(
+            address(usdc),
+            "r2://3sat-artifacts-dev/instances/usdc-question.cnf",
+            keccak256("usdc-instance"),
+            "r2://3sat-artifacts-dev/metadata/usdc-question.json",
+            keccak256("usdc-metadata"),
+            usdcReward,
+            usdcPostingFee,
             COMMIT_WINDOW,
             REVEAL_WINDOW,
             VERIFICATION_WINDOW,
@@ -278,7 +383,15 @@ contract ArtifactAccessControllerTest is Test {
 
     function _finalizedBounty() internal returns (uint256 bountyId, uint256 submissionId) {
         bountyId = _createBounty();
-        bytes32 commitHash = manager.computeCommitHash(bountyId, solver, BountyManager.SolutionKind.SatAssignment, BountyManager.ProofFormat.None, solutionRef, solutionDigest, salt);
+        bytes32 commitHash = manager.computeCommitHash(
+            bountyId,
+            solver,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest,
+            salt
+        );
 
         vm.startPrank(solver);
         token.approve(address(manager), solverBond);
@@ -286,12 +399,88 @@ contract ArtifactAccessControllerTest is Test {
         vm.stopPrank();
 
         vm.prank(solver);
-        manager.revealSolution(bountyId, submissionId, BountyManager.SolutionKind.SatAssignment, BountyManager.ProofFormat.None, solutionRef, solutionDigest, salt);
+        manager.revealSolution(
+            bountyId,
+            submissionId,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest,
+            salt
+        );
 
         vm.prank(verifierA);
-        manager.attest(bountyId, submissionId, true, BountyManager.SolutionKind.SatAssignment, BountyManager.ProofFormat.None, solutionRef, solutionDigest);
+        manager.attest(
+            bountyId,
+            submissionId,
+            true,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest
+        );
         vm.prank(verifierB);
-        manager.attest(bountyId, submissionId, true, BountyManager.SolutionKind.SatAssignment, BountyManager.ProofFormat.None, solutionRef, solutionDigest);
+        manager.attest(
+            bountyId,
+            submissionId,
+            true,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest
+        );
+
+        manager.finalize(bountyId, submissionId);
+    }
+
+    function _finalizedUsdcBounty() internal returns (uint256 bountyId, uint256 submissionId) {
+        bountyId = _createUsdcBounty();
+        bytes32 commitHash = manager.computeCommitHash(
+            bountyId,
+            solver,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest,
+            salt
+        );
+
+        vm.startPrank(solver);
+        usdc.approve(address(manager), usdcSolverBond);
+        submissionId = manager.commitSolution(bountyId, commitHash);
+        vm.stopPrank();
+
+        vm.prank(solver);
+        manager.revealSolution(
+            bountyId,
+            submissionId,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest,
+            salt
+        );
+
+        vm.prank(verifierA);
+        manager.attest(
+            bountyId,
+            submissionId,
+            true,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest
+        );
+        vm.prank(verifierB);
+        manager.attest(
+            bountyId,
+            submissionId,
+            true,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest
+        );
 
         manager.finalize(bountyId, submissionId);
     }

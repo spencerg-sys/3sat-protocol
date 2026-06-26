@@ -23,7 +23,7 @@ Unlocks release already-held tokens. Vesting and controller contracts never mint
 ## Allocation Logic
 
 - Community incentives: `3500` bps.
-- Treasury / DAO reserve: `2000` bps.
+- Treasury reserve: `2000` bps.
 - Team & contributors: `1500` bps.
 - Investors / strategic partners: `2500` bps.
 - Liquidity / market making: `500` bps.
@@ -52,7 +52,7 @@ The implementation uses 30-day months for deterministic EVM time math.
 
 ## Community Incentives
 
-`CommunityIncentivesController` holds 35% of `S_MAX`. Only the owner, intended to be a timelock or multisig in production, may release tokens.
+`CommunityIncentivesController` holds 35% of `S_MAX`. Only the owner, intended to be a project-controlled owner or multisig in production, may release tokens.
 
 Cumulative caps use 365-day years:
 
@@ -81,9 +81,9 @@ Releases transfer already-held tokens to the configured treasury address.
 
 ## Bounty Protocol
 
-`BountyManager` escrows token-denominated rewards, verifier reward pools, posting fees, and solver bonds in `3SAT`.
+`BountyManager` escrows token-denominated rewards, verifier reward pools, posting fees, and solver bonds in the bounty payment asset selected by the issuer. The accepted payment assets are owner-controlled ERC-20 addresses, with reference support for USDC and `3SAT`.
 
-Bounty creation stores issuer, instance reference, instance digest, metadata URI, metadata digest, reward, verifier reward pool, posting fee, timing windows, and verifier quorum. Issuer transfers `reward + verifierRewardPool + postingFee` to escrow.
+Bounty creation stores issuer, payment asset, instance reference, instance digest, metadata URI, metadata digest, reward, verifier reward pool, posting fee, timing windows, and verifier quorum. Issuer transfers `reward + verifierRewardPool + postingFee` in the selected payment asset to escrow.
 
 Verifier reward pool defaults to:
 
@@ -107,7 +107,7 @@ commitHash = keccak256(abi.encodePacked(
 ));
 ```
 
-The solver locks the current protocol `solverBond` when committing. The deployment default is `10 3SAT`.
+The solver locks the current `solverBondForToken(paymentToken)` when committing. The reference deployment default is `10 3SAT` for `3SAT` bounties and `10 USDC` for USDC bounties.
 
 Reveal verifies the commitment and stores `solutionRef` and `solutionDigest`. A wrong reveal marks the submission invalid and slashes the solver bond through `TreasuryRouter`.
 
@@ -163,24 +163,26 @@ targetSolverReward = bounty.reward * defaultSolverAccessRewardBps / 10000
 price = ceil(targetSolverReward * 10000 / solverRoyaltyBps)
 ```
 
-Deployment defaults:
+Reference defaults:
 
-- `defaultSolverAccessRewardBps = 100`, so the winning solver receives 1% of bounty reward per paid answer download.
+- Answer access uses the bounty payment asset by default.
+- `defaultSolverAccessRewardBps = 100`, so the winning solver receives 1% of bounty reward per paid answer download, denominated in the bounty payment asset.
 - `solverRoyaltyBps = 5000`, so the solver receives 50% of the access price.
 - The remaining 50% routes through `TreasuryRouter`.
 
-With defaults, answer access costs 2% of the bounty reward: 1% goes to the winning solver, and 1% is routed to treasury/burn.
+With defaults, answer access costs 2% of the bounty reward in the same asset as the bounty: 1% goes to the winning solver, and 1% is routed to treasury/burn. USDC routed fees go fully to treasury; `3SAT` routed fees can burn a configured share and send the remainder to treasury.
 
 ## Verifier Registry
 
 Verifiers stake `3SAT`, can request unstake, wait through the unbonding delay, then withdraw. Eligibility requires registration, enabled status, and active stake at or above `minimumStake`.
 
-Only the authorized `BountyManager` may call `slash(...)` for protocol-detected invalid behavior. The owner can also slash and disable a verifier for off-chain or operational misconduct, subject to governance policy.
+Only the authorized `BountyManager` may call `slash(...)` for protocol-detected invalid behavior. The owner can also slash and disable a verifier for off-chain or operational misconduct under the project's verifier policy.
 
 ## Treasury Router
 
-`TreasuryRouter` receives posting fees, slashed solver bonds, and routed artifact access fees. It burns `burnBps` and transfers the remainder to treasury. Routing basis points cannot exceed `10000`.
+`TreasuryRouter` receives posting fees, slashed solver bonds, and routed artifact access fees. Routing is configured per ERC-20 token. For tokens with a non-zero burn share, it burns `burnBps[token]` and transfers the remainder to treasury. Routing basis points cannot exceed `10000`.
 
-Deployment default:
+Reference defaults:
 
-- `burnBps = 2000`, so 20% of routed fees burn and 80% transfer to treasury.
+- USDC: `burnBps = 0`, so 100% of routed USDC transfers to treasury.
+- `3SAT`: `burnBps = 2000`, so 20% of routed `3SAT` burns and 80% transfers to treasury.

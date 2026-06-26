@@ -11,12 +11,12 @@ No production deployment should be performed until final parameters, production 
 `contracts/script/Deploy.s.sol` reads:
 
 - `S_MAX`: max supply in wei units, divisible by `10000`.
-- `COMMUNITY_PROGRAM_OWNER`: owner for community release authorization, intended timelock or multisig.
+- `COMMUNITY_PROGRAM_OWNER`: owner for community release authorization, intended project-controlled owner or multisig.
 - `TREASURY_ADDRESS`: treasury recipient for reserve releases and router transfers.
 - `TEAM_BENEFICIARY`: team vesting beneficiary.
 - `INVESTOR_BENEFICIARY`: investor vesting beneficiary.
 - `LIQUIDITY_ADDRESS`: liquidity recipient or liquidity manager.
-- `OWNER_ADDRESS`: final protocol owner, intended timelock or multisig.
+- `OWNER_ADDRESS`: final protocol owner, intended project-controlled owner or multisig.
 
 Optional deployment parameters:
 
@@ -60,9 +60,8 @@ Before Arbitrum One:
 
 - Finalize `S_MAX`.
 - Finalize treasury, liquidity, team, investor, owner, and community program owner addresses.
-- Use Safe multisig and/or `ProtocolTimelock` as `OWNER_ADDRESS`.
-- Use Safe multisig and/or timelock-controlled addresses for `COMMUNITY_PROGRAM_OWNER` and `TREASURY_ADDRESS`.
-- Ensure `OWNER_ADDRESS`, `COMMUNITY_PROGRAM_OWNER`, and `TREASURY_ADDRESS` are deployed contracts; the script rejects EOAs for these on Arbitrum One.
+- Use a project Safe multisig or reviewed owner address as `OWNER_ADDRESS`.
+- Use project-controlled addresses for `COMMUNITY_PROGRAM_OWNER` and `TREASURY_ADDRESS`.
 - Set `PRODUCTION_DEPLOYMENT_APPROVED=true` only for the final reviewed run.
 - Verify all contracts on Arbiscan.
 - Run independent security review or audit.
@@ -107,7 +106,7 @@ It writes a deployment JSON file under `contracts/deployments/3sat-<chainId>.jso
 
 Before publishing a deployment address set:
 
-- Confirm each contract owner is the expected Safe or timelock.
+- Confirm each contract owner is the expected project owner or Safe.
 - Confirm `VerifierRegistry.bountyManager()` points to the deployed `BountyManager`.
 - Confirm `ArtifactAccessController` points to the deployed `BountyManager` and `TreasuryRouter`.
 - Confirm token allocation balances match the release record.
@@ -123,4 +122,4 @@ forge verify-contract <address> <ContractName> \
   --constructor-args <encoded-args>
 ```
 
-Store verified source, constructor args, deployment commit, deployment JSON, Safe owner configuration, and final parameters in the production release record.
+Store verified source, constructor args, deployment commit, deployment JSON, owner configuration, and final parameters in the production release record.
