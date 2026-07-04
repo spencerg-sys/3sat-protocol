@@ -17,6 +17,16 @@ The protocol lets an issuer escrow a token-denominated bounty for a SAT/CNF inst
 
 The web application, indexer, storage service, solver clients, and verifier clients are separate from this contract repository.
 
+## Project Links
+
+- Website: https://3sat.network/
+- Web app: https://3sat.network/app
+- Issuer console: https://3sat.network/app/issuer
+- Solver console: https://3sat.network/app/solver
+- Protocol docs: https://3sat.network/docs/api
+- SAT Academy: https://3sat.network/docs/academy
+- CLI repository: https://github.com/spencerg-sys/3sat-cli
+
 ## Repository Layout
 
 - `contracts/src`: Solidity contracts.
@@ -121,6 +131,39 @@ Issuer access to the finalized winning answer is free.
 | Verification window ends without an accepted candidate | Bounty can finalize without a winner according to contract rules |
 | Solver commits but does not reveal | The unrevealed solver bond can be claimed according to timeout rules |
 | Solver reveals with invalid preimage or digest | The solver bond is slashed according to contract rules |
+
+## Using The Protocol
+
+The web app is the primary interface for issuers, solvers, buyers, and verifiers:
+
+- Marketplace and search: https://3sat.network/app
+- Create bounties: https://3sat.network/app/issuer
+- Solve bounties: https://3sat.network/app/solver
+
+Advanced users can use the open-source 3SAT CLI for scripted workflows:
+
+```bash
+pip install 3sat
+```
+
+Common CLI commands:
+
+```bash
+3sat doctor
+3sat tokens
+3sat marketplace
+3sat search problem.cnf
+3sat issue problem.cnf --reward 100 --token USDC --dry-run
+3sat issue problem.cnf --reward 100 --token USDC --send
+3sat buy-answer SAT-XXXX-XXXX-XXXX --send
+3sat download-answer SAT-XXXX-XXXX-XXXX -o answer.zip
+3sat upload-solution answer.cnf --kind sat
+3sat prepare-commit SAT-XXXX-XXXX-XXXX --solver 0xSolverWallet --solution-ref r2://... --solution-digest 0x...
+3sat commit SAT-XXXX-XXXX-XXXX --solution-ref r2://... --solution-digest 0x... --private-key 0x... --send
+3sat reveal --bundle reveal.json --submission-id 1 --private-key 0x... --send
+```
+
+See the CLI repository and protocol docs for the full command reference.
 
 ## Development
 
