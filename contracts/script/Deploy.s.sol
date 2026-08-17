@@ -46,6 +46,7 @@ contract Deploy is Script {
 
         uint256 deployerPrivateKey = vm.envOr("DEPLOYER_PRIVATE_KEY", uint256(0));
         address deploymentOwner = deployerPrivateKey == 0 ? ownerAddress : vm.addr(deployerPrivateKey);
+        address officialVerifierAddress = vm.envOr("OFFICIAL_VERIFIER_ADDRESS", address(0));
         uint256 verifierMinimumStake = vm.envOr("VERIFIER_MINIMUM_STAKE", uint256(1_000 ether));
         uint256 verifierUnbondingDelayRaw = vm.envOr("VERIFIER_UNBONDING_DELAY", uint256(15 days));
         uint256 solverBond = vm.envOr("SOLVER_BOND", uint256(10 ether));
@@ -108,6 +109,9 @@ contract Deploy is Script {
         deployed.router.setTokenRouting(address(deployed.token), treasuryBurnBps);
         deployed.registry =
             new VerifierRegistry(deployed.token, verifierMinimumStake, verifierUnbondingDelay, deploymentOwner);
+        if (officialVerifierAddress != address(0)) {
+            deployed.registry.setOfficialVerifier(officialVerifierAddress, true);
+        }
         deployed.manager = new BountyManager(
             deployed.token, deployed.registry, deployed.router, solverBond, verifierRewardBps, deploymentOwner
         );
@@ -138,6 +142,10 @@ contract Deploy is Script {
             );
 
         _validateAllocations(deployed, maxSupply, liquidityAddress);
+        require(!deployed.registry.permissionlessVerificationEnabled(), "verification mode");
+        if (officialVerifierAddress != address(0)) {
+            require(deployed.registry.officialVerifier(officialVerifierAddress), "official verifier");
+        }
 
         deployed.token.transferOwnership(ownerAddress);
         deployed.community.transferOwnership(communityProgramOwner);
@@ -149,7 +157,7 @@ contract Deploy is Script {
 
         vm.stopBroadcast();
 
-        _writeDeploymentJson(deployed, ownerAddress, treasury, liquidityAddress, usdcAddress);
+        _writeDeploymentJson(deployed, ownerAddress, treasury, liquidityAddress, usdcAddress, officialVerifierAddress);
         console2.log("3SAT Protocol v1 deployment prepared for chain", block.chainid);
         console2.log("SATToken", address(deployed.token));
         console2.log("BountyManager", address(deployed.manager));
@@ -222,7 +230,8 @@ contract Deploy is Script {
         address ownerAddress,
         address treasuryAddress,
         address liquidityAddress,
-        address usdcAddress
+        address usdcAddress,
+        address officialVerifierAddress
     ) internal {
         vm.createDir("deployments", true);
         string memory object = "deployment";
@@ -234,6 +243,10 @@ contract Deploy is Script {
         vm.serializeAddress(object, "TreasuryReserveController", address(deployed.reserve));
         vm.serializeAddress(object, "TreasuryRouter", address(deployed.router));
         vm.serializeAddress(object, "VerifierRegistry", address(deployed.registry));
+        vm.serializeBool(
+            object, "permissionlessVerificationEnabled", deployed.registry.permissionlessVerificationEnabled()
+        );
+        vm.serializeAddress(object, "OFFICIAL_VERIFIER_ADDRESS", officialVerifierAddress);
         vm.serializeAddress(object, "BountyManager", address(deployed.manager));
         vm.serializeAddress(object, "ArtifactAccessController", address(deployed.accessController));
         vm.serializeAddress(object, "USDC", usdcAddress);

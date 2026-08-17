@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import { Test } from "forge-std/Test.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import { SATToken } from "../src/SATToken.sol";
 import { TokenVesting } from "../src/TokenVesting.sol";
@@ -16,9 +17,9 @@ contract BountyManagerTest is Test {
     uint256 internal constant S_MAX = 1_000_000_000 ether;
     uint64 internal constant GENESIS = 1_700_000_000;
     uint64 internal constant MONTH = 30 days;
-    uint64 internal constant COMMIT_WINDOW = 1 days;
-    uint64 internal constant REVEAL_WINDOW = 1 days;
-    uint64 internal constant VERIFICATION_WINDOW = 1 days;
+    uint64 internal constant COMMIT_WINDOW = 1 hours;
+    uint64 internal constant REVEAL_WINDOW = 1 hours;
+    uint64 internal constant VERIFICATION_WINDOW = 1 hours;
     uint64 internal constant UNBONDING_DELAY = 15 days;
     uint16 internal constant VERIFIER_REWARD_BPS = 200;
 
@@ -112,6 +113,92 @@ contract BountyManagerTest is Test {
         assertEq(bounty.revealDeadline, GENESIS + COMMIT_WINDOW + REVEAL_WINDOW);
         assertEq(bounty.verificationDeadline, GENESIS + COMMIT_WINDOW + REVEAL_WINDOW + VERIFICATION_WINDOW);
         assertEq(token.balanceOf(address(manager)), reward + _verifierRewardPool() + postingFee);
+    }
+
+    function testBountyCreationEnforcesWindowFloorsAndQuorumCap() public {
+        assertEq(manager.MIN_COMMIT_WINDOW(), 1 hours);
+        assertEq(manager.MIN_REVEAL_WINDOW(), 1 hours);
+        assertEq(manager.MIN_VERIFICATION_WINDOW(), 1 hours);
+        assertEq(manager.MAX_VERIFIER_QUORUM(), 100);
+
+        _expectInvalidBountyConfig(COMMIT_WINDOW - 1, REVEAL_WINDOW, VERIFICATION_WINDOW, 2);
+        _expectInvalidBountyConfig(COMMIT_WINDOW, REVEAL_WINDOW - 1, VERIFICATION_WINDOW, 2);
+        _expectInvalidBountyConfig(COMMIT_WINDOW, REVEAL_WINDOW, VERIFICATION_WINDOW - 1, 2);
+        _expectInvalidBountyConfig(COMMIT_WINDOW, REVEAL_WINDOW, VERIFICATION_WINDOW, 101);
+
+        uint256 cappedBountyId = _createBountyWithQuorum(100);
+        assertEq(manager.getBounty(cappedBountyId).verifierQuorum, 100);
+    }
+
+    function testBountySnapshotsSolverBondAtCreation() public {
+        uint256 bountyId = _createBounty();
+        assertEq(manager.bountySolverBond(bountyId), solverBond);
+
+        vm.prank(owner);
+        manager.setPaymentTokenConfig(address(token), false, 0);
+
+        uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
+        BountyManager.Submission memory submission = manager.getSubmission(bountyId, submissionId);
+        assertEq(submission.solverBond, solverBond);
+        assertFalse(manager.acceptedPaymentToken(address(token)));
+        assertEq(manager.solverBondForToken(address(token)), 0);
+    }
+
+    function testMaxVerifierQuorumCanFinalizeWithinGasBudget() public {
+        uint256 bountyId = _createBountyWithQuorum(manager.MAX_VERIFIER_QUORUM());
+        uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
+        vm.prank(solver);
+        manager.revealSolution(
+            bountyId,
+            submissionId,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest,
+            salt
+        );
+
+        // Exercise the largest possible attestation array: quorum - 1 incorrect
+        // votes followed by quorum correct votes.
+        for (uint160 i = 0; i < manager.MAX_VERIFIER_QUORUM() - 1; i++) {
+            address verifier = address(uint160(0x20_000) + i);
+            _fund(verifier, minimumStake);
+            _stakeVerifier(verifier);
+            vm.prank(verifier);
+            manager.attest(
+                bountyId,
+                submissionId,
+                false,
+                BountyManager.SolutionKind.SatAssignment,
+                BountyManager.ProofFormat.None,
+                solutionRef,
+                solutionDigest
+            );
+        }
+
+        for (uint160 i = 0; i < manager.MAX_VERIFIER_QUORUM(); i++) {
+            address verifier = address(uint160(0x10_000) + i);
+            _fund(verifier, minimumStake);
+            _stakeVerifier(verifier);
+            vm.prank(verifier);
+            manager.attest(
+                bountyId,
+                submissionId,
+                true,
+                BountyManager.SolutionKind.SatAssignment,
+                BountyManager.ProofFormat.None,
+                solutionRef,
+                solutionDigest
+            );
+        }
+        assertEq(manager.getAttestations(bountyId, submissionId).length, 199);
+
+        uint256 gasBefore = gasleft();
+        manager.finalize(bountyId, submissionId);
+        uint256 finalizationGas = gasBefore - gasleft();
+
+        assertLt(finalizationGas, 8_000_000);
+        assertEq(token.balanceOf(address(manager)), 0);
     }
 
     function testSolverCommitRevealSuccess() public {
@@ -306,6 +393,114 @@ contract BountyManagerTest is Test {
         assertEq(token.balanceOf(verifierA), 2_000 ether - minimumStake + 10 ether);
     }
 
+    function testVerifierRegistryDefaultsToOfficialOnlyAndStakeDoesNotAutoAuthorize() public {
+        address candidate = address(0xA001);
+        _stakeUnapprovedVerifier(candidate, minimumStake);
+
+        VerifierRegistry.Verifier memory verifier = registry.getVerifier(candidate);
+        assertFalse(registry.permissionlessVerificationEnabled());
+        assertFalse(registry.officialVerifier(candidate));
+        assertTrue(verifier.registered);
+        assertTrue(verifier.enabled);
+        assertEq(verifier.activeStake, minimumStake);
+        assertFalse(registry.isEligible(candidate));
+
+        (uint256 bountyId, uint256 submissionId,) = _createCommitReveal();
+        vm.prank(candidate);
+        vm.expectRevert(abi.encodeWithSelector(BountyManager.IneligibleVerifier.selector, candidate));
+        manager.attest(
+            bountyId,
+            submissionId,
+            true,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest
+        );
+    }
+
+    function testOwnerCanPreapproveAndRevokeOfficialVerifier() public {
+        address candidate = address(0xA002);
+
+        vm.prank(owner);
+        registry.setOfficialVerifier(candidate, true);
+        assertTrue(registry.officialVerifier(candidate));
+        assertFalse(registry.isEligible(candidate));
+
+        _stakeUnapprovedVerifier(candidate, minimumStake - 1);
+        assertFalse(registry.isEligible(candidate));
+        _stakeUnapprovedVerifier(candidate, 1);
+        assertTrue(registry.isEligible(candidate));
+
+        vm.prank(owner);
+        registry.setOfficialVerifier(candidate, false);
+        assertFalse(registry.officialVerifier(candidate));
+        assertFalse(registry.isEligible(candidate));
+
+        vm.prank(candidate);
+        vm.expectRevert();
+        registry.setOfficialVerifier(candidate, true);
+
+        vm.prank(owner);
+        vm.expectRevert(VerifierRegistry.InvalidRegistryConfig.selector);
+        registry.setOfficialVerifier(address(0), true);
+    }
+
+    function testOwnerCanEnablePermissionlessVerificationWithoutRedeployingRegistry() public {
+        address candidate = address(0xA003);
+        _stakeUnapprovedVerifier(candidate, minimumStake);
+        assertFalse(registry.isEligible(candidate));
+
+        vm.prank(candidate);
+        vm.expectRevert();
+        registry.setPermissionlessVerificationEnabled(true);
+
+        vm.prank(owner);
+        registry.setPermissionlessVerificationEnabled(true);
+        assertTrue(registry.permissionlessVerificationEnabled());
+        assertTrue(registry.isEligible(candidate));
+
+        (uint256 bountyId, uint256 submissionId,) = _createCommitReveal();
+        vm.prank(candidate);
+        manager.attest(
+            bountyId,
+            submissionId,
+            true,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest
+        );
+        assertEq(manager.getAttestations(bountyId, submissionId).length, 1);
+
+        vm.prank(owner);
+        registry.setPermissionlessVerificationEnabled(false);
+        assertFalse(registry.permissionlessVerificationEnabled());
+        assertFalse(registry.isEligible(candidate));
+        assertTrue(registry.isEligible(verifierA));
+    }
+
+    function testPermissionlessVerificationKeepsDisabledVerifierIneligible() public {
+        address candidate = address(0xA004);
+        _stakeUnapprovedVerifier(candidate, minimumStake * 3);
+
+        vm.prank(owner);
+        registry.setPermissionlessVerificationEnabled(true);
+        assertTrue(registry.isEligible(candidate));
+
+        vm.prank(owner);
+        registry.slashAndDisable(candidate);
+
+        VerifierRegistry.Verifier memory verifier = registry.getVerifier(candidate);
+        assertEq(verifier.activeStake, (minimumStake * 3) / 2);
+        assertFalse(verifier.enabled);
+        assertFalse(registry.isEligible(candidate));
+
+        vm.prank(owner);
+        registry.setVerifierEligibility(candidate, true);
+        assertTrue(registry.isEligible(candidate));
+    }
+
     function testNonVerifierCannotAttestAndDuplicateAttestRejected() public {
         (uint256 bountyId, uint256 submissionId,) = _createCommitReveal();
 
@@ -492,12 +687,168 @@ contract BountyManagerTest is Test {
         assertEq(usdc.balanceOf(treasury), treasuryBefore + usdcPostingFee);
         assertEq(usdc.totalSupply(), supplyBefore);
         assertEq(usdc.balanceOf(address(manager)), 0);
+        assertEq(manager.totalClaimablePayout(address(usdc)), 0);
 
         BountyManager.Bounty memory bounty = manager.getBounty(bountyId);
         BountyManager.Submission memory submission = manager.getSubmission(bountyId, submissionId);
         assertEq(bounty.paymentToken, address(usdc));
         assertEq(submission.bondToken, address(usdc));
         assertEq(submission.solverBond, usdcSolverBond);
+    }
+
+    function testDefersRejectedVerifierPayoutWithoutBlockingFinalizationAndAllowsRedirect() public {
+        uint256 solverBefore = usdc.balanceOf(solver);
+        uint256 verifierBBefore = usdc.balanceOf(verifierB);
+        address payoutRecipient = address(0xB0B);
+        (uint256 bountyId, uint256 submissionId) = _createUsdcCommitReveal();
+        _attestFor(bountyId, submissionId);
+
+        uint256 share = manager.verifierRewardPoolFor(usdcReward) / 2;
+        vm.mockCallRevert(
+            address(usdc),
+            abi.encodeWithSelector(IERC20.transfer.selector, verifierA, share),
+            abi.encodePacked("recipient blocked")
+        );
+
+        manager.finalize(bountyId, submissionId);
+
+        assertTrue(manager.getBounty(bountyId).finalized);
+        assertEq(manager.finalizedWinningSubmissionId(bountyId), submissionId);
+        assertEq(usdc.balanceOf(solver), solverBefore + usdcReward);
+        assertEq(usdc.balanceOf(verifierB), verifierBBefore + share);
+        assertEq(manager.claimablePayout(verifierA, address(usdc)), share);
+        assertEq(manager.totalClaimablePayout(address(usdc)), share);
+        assertEq(usdc.balanceOf(address(manager)), share);
+
+        vm.prank(nonVerifier);
+        vm.expectRevert(
+            abi.encodeWithSelector(BountyManager.InsufficientClaimablePayout.selector, uint256(0), uint256(1))
+        );
+        manager.claimPayout(address(usdc), payoutRecipient, 1);
+
+        vm.prank(verifierA);
+        vm.expectRevert();
+        manager.claimPayout(address(usdc), verifierA, share);
+        assertEq(manager.claimablePayout(verifierA, address(usdc)), share);
+
+        uint256 firstClaim = share / 2;
+        vm.prank(verifierA);
+        manager.claimPayout(address(usdc), payoutRecipient, firstClaim);
+        assertEq(manager.claimablePayout(verifierA, address(usdc)), share - firstClaim);
+        assertEq(manager.totalClaimablePayout(address(usdc)), share - firstClaim);
+
+        vm.prank(verifierA);
+        manager.claimPayout(address(usdc), payoutRecipient, share - firstClaim);
+        assertEq(usdc.balanceOf(payoutRecipient), share);
+        assertEq(manager.claimablePayout(verifierA, address(usdc)), 0);
+        assertEq(manager.totalClaimablePayout(address(usdc)), 0);
+        assertEq(usdc.balanceOf(address(manager)), 0);
+    }
+
+    function testDefersRejectedSolverRewardAndBondTogether() public {
+        uint256 solverBefore = usdc.balanceOf(solver);
+        uint256 recipientBefore = usdc.balanceOf(solverTwo);
+        (uint256 bountyId, uint256 submissionId) = _createUsdcCommitReveal();
+        _attestFor(bountyId, submissionId);
+
+        vm.mockCallRevert(
+            address(usdc),
+            abi.encodeWithSelector(IERC20.transfer.selector, solver, usdcReward),
+            abi.encodePacked("solver blocked")
+        );
+        vm.mockCallRevert(
+            address(usdc),
+            abi.encodeWithSelector(IERC20.transfer.selector, solver, usdcSolverBond),
+            abi.encodePacked("solver blocked")
+        );
+
+        manager.finalize(bountyId, submissionId);
+
+        uint256 deferred = usdcReward + usdcSolverBond;
+        assertEq(manager.finalizedWinningSolver(bountyId), solver);
+        assertEq(usdc.balanceOf(solver), solverBefore - usdcSolverBond);
+        assertEq(manager.claimablePayout(solver, address(usdc)), deferred);
+        assertEq(manager.totalClaimablePayout(address(usdc)), deferred);
+        assertEq(usdc.balanceOf(address(manager)), deferred);
+
+        vm.prank(solver);
+        manager.claimPayout(address(usdc), solverTwo, deferred);
+        assertEq(usdc.balanceOf(solverTwo), recipientBefore + deferred);
+        assertEq(manager.claimablePayout(solver, address(usdc)), 0);
+        assertEq(manager.totalClaimablePayout(address(usdc)), 0);
+    }
+
+    function testDefersRejectedIssuerNoWinnerRefund() public {
+        address payoutRecipient = address(0xB0B1);
+        uint256 bountyId = _createUsdcBounty();
+        uint256 verifierPool = manager.verifierRewardPoolFor(usdcReward);
+        vm.warp(GENESIS + COMMIT_WINDOW + 1);
+
+        vm.mockCallRevert(
+            address(usdc),
+            abi.encodeWithSelector(IERC20.transfer.selector, issuer, verifierPool),
+            abi.encodePacked("issuer blocked")
+        );
+        vm.mockCall(
+            address(usdc), abi.encodeWithSelector(IERC20.transfer.selector, issuer, usdcReward), abi.encode(false)
+        );
+
+        manager.finalize(bountyId, 0);
+
+        uint256 deferred = usdcReward + verifierPool;
+        assertTrue(manager.getBounty(bountyId).finalized);
+        assertEq(manager.claimablePayout(issuer, address(usdc)), deferred);
+        assertEq(manager.totalClaimablePayout(address(usdc)), deferred);
+        assertEq(usdc.balanceOf(address(manager)), deferred);
+
+        vm.prank(issuer);
+        manager.claimPayout(address(usdc), payoutRecipient, deferred);
+        assertEq(usdc.balanceOf(payoutRecipient), deferred);
+        assertEq(manager.totalClaimablePayout(address(usdc)), 0);
+    }
+
+    function testDefersRejectedPostFinalizationSolverBondClaim() public {
+        address payoutRecipient = address(0xB0B2);
+        (uint256 bountyId, uint256 submissionId) = _createUsdcCommitReveal();
+        vm.prank(verifierA);
+        manager.attest(
+            bountyId,
+            submissionId,
+            true,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest
+        );
+
+        _warpPastVerificationDeadline();
+        manager.finalize(bountyId, 0);
+        vm.mockCallRevert(
+            address(usdc),
+            abi.encodeWithSelector(IERC20.transfer.selector, solver, usdcSolverBond),
+            abi.encodePacked("solver blocked")
+        );
+
+        vm.prank(solver);
+        manager.claimSolverBond(bountyId, submissionId);
+
+        assertEq(manager.claimablePayout(solver, address(usdc)), usdcSolverBond);
+        assertEq(manager.totalClaimablePayout(address(usdc)), usdcSolverBond);
+        assertEq(usdc.balanceOf(address(manager)), usdcSolverBond);
+
+        vm.prank(solver);
+        manager.claimPayout(address(usdc), payoutRecipient, usdcSolverBond);
+        assertEq(usdc.balanceOf(payoutRecipient), usdcSolverBond);
+        assertEq(manager.totalClaimablePayout(address(usdc)), 0);
+    }
+
+    function testClaimPayoutRejectsInvalidArguments() public {
+        vm.expectRevert(BountyManager.InvalidPayoutClaim.selector);
+        manager.claimPayout(address(0), solver, 1);
+        vm.expectRevert(BountyManager.InvalidPayoutClaim.selector);
+        manager.claimPayout(address(usdc), address(0), 1);
+        vm.expectRevert(BountyManager.InvalidPayoutClaim.selector);
+        manager.claimPayout(address(usdc), solver, 0);
     }
 
     function testNoRevealTimeoutReopensThenNoWinnerFinalizationRefundsIssuer() public {
@@ -727,6 +1078,7 @@ contract BountyManagerTest is Test {
 
         assertEq(token.balanceOf(address(manager)), 0);
         assertEq(token.balanceOf(address(router)), 0);
+        assertEq(manager.totalClaimablePayout(address(token)), 0);
     }
 
     function _fund(address account, uint256 amount) internal {
@@ -735,13 +1087,27 @@ contract BountyManagerTest is Test {
     }
 
     function _stakeVerifier(address verifier) internal {
+        vm.prank(owner);
+        registry.setOfficialVerifier(verifier, true);
         vm.startPrank(verifier);
         token.approve(address(registry), minimumStake);
         registry.stake(minimumStake, "ipfs://verifier");
         vm.stopPrank();
     }
 
+    function _stakeUnapprovedVerifier(address verifier, uint256 amount) internal {
+        _fund(verifier, amount);
+        vm.startPrank(verifier);
+        token.approve(address(registry), amount);
+        registry.stake(amount, "ipfs://candidate");
+        vm.stopPrank();
+    }
+
     function _createBounty() internal returns (uint256 bountyId) {
+        return _createBountyWithQuorum(2);
+    }
+
+    function _createBountyWithQuorum(uint16 verifierQuorum) internal returns (uint256 bountyId) {
         vm.startPrank(issuer);
         token.approve(address(manager), reward + _verifierRewardPool() + postingFee);
         bountyId = manager.createBounty(
@@ -755,7 +1121,7 @@ contract BountyManagerTest is Test {
             COMMIT_WINDOW,
             REVEAL_WINDOW,
             VERIFICATION_WINDOW,
-            2
+            verifierQuorum
         );
         vm.stopPrank();
     }
@@ -775,6 +1141,31 @@ contract BountyManagerTest is Test {
             REVEAL_WINDOW,
             VERIFICATION_WINDOW,
             2
+        );
+        vm.stopPrank();
+    }
+
+    function _expectInvalidBountyConfig(
+        uint64 commitWindow,
+        uint64 revealWindow,
+        uint64 verificationWindow,
+        uint16 verifierQuorum
+    ) internal {
+        vm.startPrank(issuer);
+        token.approve(address(manager), reward + _verifierRewardPool() + postingFee);
+        vm.expectRevert(BountyManager.InvalidBountyConfig.selector);
+        manager.createBounty(
+            address(token),
+            "bafy-instance",
+            keccak256("instance"),
+            "ipfs://metadata",
+            keccak256("metadata"),
+            reward,
+            postingFee,
+            commitWindow,
+            revealWindow,
+            verificationWindow,
+            verifierQuorum
         );
         vm.stopPrank();
     }
@@ -828,6 +1219,32 @@ contract BountyManagerTest is Test {
             solutionDigest,
             salt
         );
+    }
+
+    function _createUsdcCommitReveal() internal returns (uint256 bountyId, uint256 submissionId) {
+        bountyId = _createUsdcBounty();
+        bytes32 commitHash = manager.computeCommitHash(
+            bountyId,
+            solver,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest,
+            salt
+        );
+        vm.startPrank(solver);
+        usdc.approve(address(manager), usdcSolverBond);
+        submissionId = manager.commitSolution(bountyId, commitHash);
+        manager.revealSolution(
+            bountyId,
+            submissionId,
+            BountyManager.SolutionKind.SatAssignment,
+            BountyManager.ProofFormat.None,
+            solutionRef,
+            solutionDigest,
+            salt
+        );
+        vm.stopPrank();
     }
 
     function _attestFor(uint256 bountyId, uint256 submissionId) internal {

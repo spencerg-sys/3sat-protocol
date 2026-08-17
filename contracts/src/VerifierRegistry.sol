@@ -8,7 +8,7 @@ import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.s
 import { IERC20Burnable } from "./interfaces/IERC20Burnable.sol";
 
 /// @title VerifierRegistry
-/// @notice Verifiers stake 3SAT to become eligible for bounty attestations.
+/// @notice Verifiers stake 3SAT and satisfy the active admission policy to attest to bounties.
 contract VerifierRegistry is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -28,8 +28,10 @@ contract VerifierRegistry is Ownable, ReentrancyGuard {
     uint256 public minimumStake;
     uint64 public unbondingDelay;
     address public bountyManager;
+    bool public permissionlessVerificationEnabled;
 
     mapping(address verifier => Verifier) private verifiers;
+    mapping(address verifier => bool approved) public officialVerifier;
 
     event VerifierRegistered(address indexed verifier, string metadataURI);
     event StakeDeposited(address indexed verifier, uint256 amount, uint256 activeStake);
@@ -40,6 +42,8 @@ contract VerifierRegistry is Ownable, ReentrancyGuard {
     event MinimumStakeUpdated(uint256 minimumStake);
     event UnbondingDelayUpdated(uint64 unbondingDelay);
     event BountyManagerUpdated(address indexed bountyManager);
+    event OfficialVerifierStatusUpdated(address indexed verifier, bool approved);
+    event PermissionlessVerificationUpdated(bool enabled);
 
     error InvalidRegistryConfig();
     error InvalidAmount();
@@ -64,7 +68,8 @@ contract VerifierRegistry is Ownable, ReentrancyGuard {
 
     function isEligible(address verifier) public view returns (bool) {
         Verifier storage data = verifiers[verifier];
-        return data.registered && data.enabled && data.activeStake >= minimumStake;
+        return data.registered && data.enabled && data.activeStake >= minimumStake
+            && (permissionlessVerificationEnabled || officialVerifier[verifier]);
     }
 
     function stake(uint256 amount, string calldata metadataURI) external nonReentrant {
@@ -133,6 +138,28 @@ contract VerifierRegistry is Ownable, ReentrancyGuard {
         if (eligible != wasEligible) {
             emit VerifierEligibilityChanged(verifier, eligible);
         }
+    }
+
+    /// @notice Adds or removes a verifier from the official set used in official-only mode.
+    /// @dev Approval may be configured before the verifier registers or stakes.
+    ///      Revocation does not suspend a verifier while permissionless verification is enabled;
+    ///      use setVerifierEligibility(verifier, false) to suspend in both modes.
+    function setOfficialVerifier(address verifier, bool approved) external onlyOwner {
+        if (verifier == address(0)) {
+            revert InvalidRegistryConfig();
+        }
+
+        bool wasEligible = isEligible(verifier);
+        officialVerifier[verifier] = approved;
+        emit OfficialVerifierStatusUpdated(verifier, approved);
+        _emitEligibilityIfChanged(verifier, wasEligible);
+    }
+
+    /// @notice Switches between official-only and permissionless verifier admission.
+    /// @dev Disabled or under-staked verifiers remain ineligible in either mode.
+    function setPermissionlessVerificationEnabled(bool enabled) external onlyOwner {
+        permissionlessVerificationEnabled = enabled;
+        emit PermissionlessVerificationUpdated(enabled);
     }
 
     function slashAndDisable(address verifier, uint16 slashBps) external onlyOwner nonReentrant {
