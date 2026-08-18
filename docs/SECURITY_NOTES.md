@@ -22,6 +22,7 @@ The API/server layer is untrusted and non-custodial by default. It may prepare c
 
 - Parameter risk: `S_MAX`, accepted payment assets, verifier stake, solver bond per payment asset, verifier reward bps, artifact access pricing, routing bps, and time windows must be reviewed before production.
 - Owner risk: protocol owner powers should be held by a reviewed project-controlled account or Safe multisig before production.
+- Verifier admission risk: official-only mode centralizes trust and liveness in owner-approved operators; permissionless mode reintroduces audit finding C-01 because a single operator can fund multiple fixed-stake addresses and attempt to form quorum.
 - Verifier quality risk: verifier clients and operator policies must reduce false accept/reject attestations.
 - Automation risk: keeper and indexer infrastructure must be monitored because finalization is permissionless but not self-executing.
 - Gas risk: bounty systems with many submissions or attestations need production gas review.
@@ -40,10 +41,12 @@ The API/server layer is untrusted and non-custodial by default. It may prepare c
 - Community and treasury release caps are enforced on-chain.
 - Bounty rewards, verifier reward pools, posting fees, solver bonds, and verifier slashes use `SafeERC20`.
 - Reentrancy protection on escrow, release, finalization, and access purchase flows.
-- Solver commitments bind bounty id, solver address, solution reference, solution digest, and salt.
+- Solver commitments bind bounty id, solver address, solution kind, proof format, solution reference, solution digest, and salt.
 - Wrong reveal marks the submission invalid and slashes solver bond.
 - Non-revealed committed submissions can be slashed after the protocol windows close.
-- Verifier attestation eligibility is checked on-chain.
+- Verifier attestation eligibility is checked on-chain and defaults to fail-closed official-only admission.
+- Official approval never bypasses registration, enabled status, or the minimum-stake requirement.
+- Owner-authorized disablement remains effective in both verifier admission modes.
 - Duplicate attestations are rejected.
 - Solvers cannot attest to their own submissions.
 - Issuers cannot attest on submissions for their own bounties.
@@ -57,6 +60,8 @@ The API/server layer is untrusted and non-custodial by default. It may prepare c
 - External audit before production value is at risk.
 - Formal parameter review for `S_MAX`, `minimumStake`, `solverBond`, `verifierRewardBps`, quorum, windows, access pricing, and routing bps.
 - Decide final treasury, liquidity, team, investor, owner, and community program owner addresses.
+- Approve, fund, stake, and monitor enough independent official verifier operators to satisfy every allowed launch quorum.
+- Do not enable permissionless verification until C-01 is remediated with stronger stake/quorum/slashing economics or its risk is formally accepted and disclosed.
 - Confirm liquidity recipient is a reviewed address or manager contract.
 - Add monitoring for finalizable bounties, failed keeper transactions, release caps, verifier slashing, and artifact access payments.
 - Add deployment runbook sign-off and explorer verification artifacts.

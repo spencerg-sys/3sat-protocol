@@ -85,6 +85,8 @@ Releases transfer already-held tokens to the configured treasury address.
 
 Bounty creation stores issuer, payment asset, instance reference, instance digest, metadata URI, metadata digest, reward, verifier reward pool, posting fee, timing windows, and verifier quorum. Issuer transfers `reward + verifierRewardPool + postingFee` in the selected payment asset to escrow.
 
+`verifierQuorum` must be between `1` and `100`, inclusive. The upper bound keeps the synchronous verifier-reward settlement path within a tested transaction gas budget; it is not a verifier-trust or allowlist control.
+
 Verifier reward pool defaults to:
 
 ```solidity
@@ -95,27 +97,89 @@ The deployment default is `verifierRewardBps = 200`, or 2% of bounty reward.
 
 ## Commit and Reveal
 
-Solvers first commit a hidden solution:
+Solvers first commit a hidden solution. The current v1 commitment is exactly the following Solidity expression from `BountyManager.computeCommitHash(...)`:
 
 ```solidity
 commitHash = keccak256(abi.encodePacked(
     bountyId,
     solver,
+    solutionKind,
+    proofFormat,
     solutionRef,
     solutionDigest,
     salt
 ));
 ```
 
-The solver locks the current `solverBondForToken(paymentToken)` when committing. The reference deployment default is `10 3SAT` for `3SAT` bounties and `10 USDC` for USDC bounties.
+The packed fields, in their binding order, are:
+
+| Position | Field | Exact Solidity type | Packed representation |
+| ---: | --- | --- | --- |
+| 1 | `bountyId` | `uint256` | 32-byte, big-endian unsigned integer |
+| 2 | `solver` | `address` | 20 raw address bytes |
+| 3 | `solutionKind` | `SolutionKind`, encoded as `uint8` | One byte: `1` = `SatAssignment`, `2` = `UnsatProof` |
+| 4 | `proofFormat` | `ProofFormat`, encoded as `uint8` | One byte: `0` = `None`, `1` = `DRAT`, `2` = `FRAT`, `3` = `LRAT` |
+| 5 | `solutionRef` | `string` | Exact string bytes, without a length prefix or padding |
+| 6 | `solutionDigest` | `bytes32` | 32 bytes |
+| 7 | `salt` | `bytes32` | 32 bytes |
+
+Client implementations must not omit or reorder `solutionKind` and `proofFormat`. They must also preserve the exact `solutionRef` bytes; trimming, Unicode normalization, case changes, or URI rewriting after commit produces a different hash. The website implementation uses the equivalent viem type list:
+
+```typescript
+["uint256", "address", "uint8", "uint8", "string", "bytes32", "bytes32"]
+```
+
+### Chain and contract domain in v1
+
+The v1 preimage does **not** include `block.chainid`, the `BountyManager` contract address, a protocol version, or an EIP-712 domain separator. `bountyId` is local to one `BountyManager`; it is not a globally unique domain identifier. Consequently, the same seven field values produce the same commitment on another chain or another deployment. The solver address prevents another address from revealing the commitment, but it does not provide chain or contract domain separation.
+
+This is the deployed v1 compatibility rule, not a claim that cross-deployment replay is cryptographically excluded. A future domain-separated commitment must be introduced as a versioned, coordinated contract and client change rather than silently changing this formula.
+
+### Fixed interoperability vector
+
+Every conforming implementation must produce the following fixed vector:
+
+| Field | Value |
+| --- | --- |
+| `bountyId` | `42` |
+| `solver` | `0x1111111111111111111111111111111111111111` |
+| `solutionKind` | `2` (`UnsatProof`) |
+| `proofFormat` | `2` (`FRAT`) |
+| `solutionRef` | `ipfs://bafybeigdyrzt3sat-proof.frat` |
+| `solutionDigest` | `0x2222222222222222222222222222222222222222222222222222222222222222` |
+| `salt` | `0x3333333333333333333333333333333333333333333333333333333333333333` |
+
+The 153-byte packed preimage is:
+
+```text
+0x000000000000000000000000000000000000000000000000000000000000002a11111111111111111111111111111111111111110202697066733a2f2f62616679626569676479727a74337361742d70726f6f662e6672617422222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333
+```
+
+The expected commitment is:
+
+```text
+0x9ba971dab4904c15091dcc19c403c600aa1d1c2c54ede92ebc4b4e8116377eb1
+```
+
+Creating a bounty snapshots the then-current `solverBondForToken(paymentToken)` into `bountySolverBond(bountyId)`. Every solver committing to that bounty posts the snapshotted amount, so later owner changes affect only newly created bounties. The reference deployment default is `10 3SAT` for `3SAT` bounties and `10 USDC` for USDC bounties.
 
 Reveal verifies the commitment and stores `solutionRef` and `solutionDigest`. A wrong reveal marks the submission invalid and slashes the solver bond through `TreasuryRouter`.
 
 If a solver commits but never reveals, the submission can be finalized through the no-winner path after the reveal and verification windows close. That path slashes the solver bond.
 
+### Arbitrum timing profile
+
+Normal Arbitrum One transactions are typically sequenced quickly, but protocol deadlines must also account for sequencer downtime or censorship. The Arbitrum Nitro whitepaper documents the Delayed Inbox fallback and states that a message can be force-included after the threshold period, currently 24 hours. That threshold is reached before the force-inclusion transaction and its L1 confirmation, so a 24-hour application deadline does not provide a complete forced-inclusion recovery path.
+
+The current contracts enforce a **1-hour minimum for each of `commitWindow`, `revealWindow`, and `verificationWindow`** as the fast initial-launch profile. This is a timeout floor, not a mandatory wait: commit, reveal, attest, and accepted finalization can still happen immediately.
+
+The 1-hour profile deliberately does not cover the Delayed Inbox force-inclusion path. A sequencer outage or censorship period lasting through a deadline can therefore cause a valid participant to miss that phase. Deployments that require force-inclusion resilience should configure materially longer per-bounty windows (48 hours remains the conservative reference setting) and re-check live Arbitrum parameters before deployment.
+
+Reference: [Arbitrum Nitro whitepaper, section 2.1](https://docs.arbitrum.io/nitro-whitepaper.pdf).
+
 ## Verifier Attestation
 
-Verifiers must be eligible in `VerifierRegistry`.
+Verifiers must be eligible in `VerifierRegistry`. Eligibility always requires registration, enabled status, and active stake at or above `minimumStake`. In the default official-only mode it additionally requires `officialVerifier(verifier) == true`; in permissionless mode the official-approval condition is waived, but the other three conditions remain.
 
 Attestation rules:
 
@@ -150,11 +214,15 @@ No-winner finalization:
 
 `BountyManager.isFinalizable(bountyId, submissionId)` exposes finalization readiness for keepers and indexers.
 
+User-facing payouts are attempted immediately. If the payment token rejects a solver, issuer, or verifier recipient, finalization and bond settlement continue and the amount is recorded in `claimablePayout(beneficiary, paymentToken)`. The beneficiary can later call `claimPayout(paymentToken, recipient, amount)` and redirect the funds to a receivable address. Posting-fee and slash routing remain protocol dependencies and must succeed for the surrounding settlement transaction to complete.
+
 ## Artifact Access
 
 `ArtifactAccessController` records paid access rights for private protocol artifacts.
 
-Solution access is available only after bounty finalization with a winning solver. Issuers can access their own finalized answer without payment. Other users call `purchaseAccess(bountyId, ARTIFACT_SOLUTION)`.
+Solution access is available only after bounty finalization with a winning solver. Issuers can access their own finalized answer without payment. Clients first call `accessQuoteWithEpoch(bountyId, ARTIFACT_SOLUTION, paymentToken)`, which atomically returns the current manager epoch plus an explicit `Unconfigured`, `Public`, `Priced`, or `Disabled` status. A numeric zero must never be treated as public access unless the status is explicitly `Public`.
+
+For a `Priced` quote, clients call `purchaseAccess(bountyId, ARTIFACT_SOLUTION, paymentToken, maxPrice, deadline, expectedManagerEpoch)`. `maxPrice` is the price shown to the user, `expectedManagerEpoch` comes from the same atomic quote, and `deadline` is a short client-selected expiry; the reference website and CLI use 30 minutes. If the owner raises the price or replaces `BountyManager` before execution, the transaction reverts instead of charging more or purchasing a reused ID from a different manager. A lower price in the same epoch is accepted. Legacy two- and three-argument purchase selectors remain callable for issuer, already-owned, and public paths, but intentionally reject a paid purchase so older clients cannot silently bypass price protection.
 
 Default solution access pricing targets a recurring solver royalty:
 
@@ -172,11 +240,19 @@ Reference defaults:
 
 With defaults, answer access costs 2% of the bounty reward in the same asset as the bounty: 1% goes to the winning solver, and 1% is routed to treasury/burn. USDC routed fees go fully to treasury; `3SAT` routed fees can burn a configured share and send the remainder to treasury.
 
+Access prices and purchased rights are namespaced by `bountyManagerEpoch`. Replacing `BountyManager` increments the epoch, so a reused numeric bounty ID cannot inherit a price or access right from the previous manager. Historical rights remain queryable through `hasAccessAtEpoch`; they do not authorize artifacts in the current epoch.
+
 ## Verifier Registry
 
-Verifiers stake `3SAT`, can request unstake, wait through the unbonding delay, then withdraw. Eligibility requires registration, enabled status, and active stake at or above `minimumStake`.
+Verifiers stake `3SAT`, can request unstake, wait through the unbonding delay, then withdraw. Staking is open in both admission modes, but staking alone does not confer eligibility in official-only mode.
 
-Only the authorized `BountyManager` may call `slash(...)` for protocol-detected invalid behavior. The owner can also slash and disable a verifier for off-chain or operational misconduct under the project's verifier policy.
+A fresh registry is fail-closed: `permissionlessVerificationEnabled()` is `false` and no address is in `officialVerifier`. The owner may approve or revoke an address with `setOfficialVerifier(verifier, approved)`. Approval may happen before registration or staking. An approved verifier still must be registered, enabled, and sufficiently staked.
+
+The owner may later call `setPermissionlessVerificationEnabled(true)` to admit every registered, enabled, sufficiently staked verifier without redeploying the registry. Switching it back to `false` immediately restores the official-approval requirement. `setVerifierEligibility(verifier, false)` remains the suspension mechanism in both modes; merely revoking official status does not suspend an otherwise eligible verifier while permissionless mode is enabled.
+
+Official-only admission is the v1 launch containment for audit finding C-01, not a repair of permissionless economics. In permissionless mode, eligibility remains one-address-one-attestation at a fixed minimum stake that does not scale with bounty value. One operator can fund multiple verifier addresses and attempt to form quorum. Permissionless mode must not be enabled until that mechanism is upgraded or protocol governance explicitly accepts and discloses the resulting risk.
+
+Only the registry owner may call `slashAndDisable(...)`; the current contracts do not automatically slash verifiers for an incorrect attestation. Owner-authorized slashing and disablement therefore depends on the project's verifier policy and governance process.
 
 ## Treasury Router
 

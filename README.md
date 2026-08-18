@@ -10,8 +10,8 @@ The protocol lets an issuer escrow a token-denominated bounty for a SAT/CNF inst
 
 - Issuers post SAT/CNF bounties and escrow the bounty reward.
 - Solvers commit to a solution before revealing the solution reference and digest.
-- Verifiers stake `3SAT`, check revealed submissions, and attest accept or reject.
-- Accepted submissions can be finalized by protocol automation or any eligible caller.
+- Verifiers stake `3SAT`; under the default official-only admission policy they must also be approved by the protocol owner before they can attest accept or reject.
+- Accepted submissions can be finalized by protocol automation or any caller; verifier eligibility is required for attestation, not finalization.
 - Finalized answers can be made available through paid artifact access.
 - Protocol fees can be routed per payment asset, for example USDC fully to treasury and `3SAT` between burn and treasury.
 
@@ -43,7 +43,7 @@ The web application, indexer, storage service, solver clients, and verifier clie
 - `CommunityIncentivesController`: community allocation controller with cumulative annual caps.
 - `TreasuryReserveController`: treasury reserve controller with bootstrap and strategic unlock schedules.
 - `TreasuryRouter`: routes protocol fees between token burn and treasury distribution.
-- `VerifierRegistry`: verifier staking, eligibility, unbonding, disablement, and authorized slashing.
+- `VerifierRegistry`: official-only or permissionless verifier admission, staking, eligibility, unbonding, disablement, and authorized slashing.
 - `BountyManager`: bounty escrow, solver commit-reveal, solver bonds, verifier attestations, quorum, finalization, and reward accounting.
 - `ArtifactAccessController`: paid access rights for finalized solution artifacts.
 
@@ -82,10 +82,10 @@ These are set per bounty by the issuer when a bounty is created.
 | --- | --- |
 | Payment asset | ERC-20 token selected by the issuer for this bounty, currently `USDC` or `3SAT` |
 | Reward | Main bounty reward escrowed for the winning solver |
-| Commit window | Time available for solvers to commit solution hashes |
-| Reveal window | Time available for committed solvers to reveal solution references and digests |
-| Verification window | Time available for eligible verifiers to attest to revealed submissions |
-| Verifier quorum | Number of accept attestations required for an accepted candidate |
+| Commit window | Time available for solvers to commit solution hashes; minimum `1 hour` |
+| Reveal window | Time available for committed solvers to reveal solution references and digests; minimum `1 hour` |
+| Verification window | Time available for eligible verifiers to attest to revealed submissions; minimum `1 hour` |
+| Verifier quorum | Number of accept attestations required for an accepted candidate; range `1-100` |
 
 The protocol uses stage-based timing: commit, reveal, and verification windows are sequential phases.
 
@@ -93,11 +93,12 @@ The protocol uses stage-based timing: commit, reveal, and verification windows a
 
 | Parameter | Current reference value | Contract | Notes |
 | --- | ---: | --- | --- |
+| Verifier admission | official-only | `VerifierRegistry` | A fresh registry has no approved official verifier; staking alone does not make an address eligible |
 | Verifier minimum stake | `1,000 3SAT` | `VerifierRegistry` | Required for verifier eligibility |
 | Verifier unbonding delay | `15 days` | `VerifierRegistry` | Delay before requested unstake can be withdrawn |
 | Official verifier slash | `50%` | `VerifierRegistry` | Owner-authorized slash also disables the verifier |
 | Accepted bounty payment assets | `USDC`, `3SAT` | `BountyManager` | The owner can enable or disable ERC-20 payment assets for new bounties |
-| Solver bond | `10` units of the bounty payment asset | `BountyManager` | Configured per payment asset and posted when committing a solution |
+| Solver bond | `10` units of the bounty payment asset | `BountyManager` | Configured per payment asset, snapshotted when the bounty is created, and posted when committing a solution |
 | Verifier reward pool | `2%` of bounty reward | `BountyManager` | Paid in the bounty payment asset and split among correct accepting verifiers |
 | Max verifier reward pool | `10%` of bounty reward | `BountyManager` | Contract-level cap |
 | Treasury burn share | per token | `TreasuryRouter` | Reference routing is `0%` burn for USDC and `20%` burn for `3SAT` routed fees |
@@ -107,9 +108,17 @@ The protocol uses stage-based timing: commit, reveal, and verification windows a
 | Solver royalty share of access fee | `50%` | `ArtifactAccessController` | Remaining access fee is routed through `TreasuryRouter` |
 | Max solver royalty share | `50%` | `ArtifactAccessController` | Contract-level cap |
 
+The initial launch is fail-closed: while `permissionlessVerificationEnabled()` is `false`, an address is eligible only if it is registered, enabled, sufficiently staked, and approved through `setOfficialVerifier(address, true)`. With no approved official verifier, nobody is eligible. The owner can later switch to permissionless admission with `setPermissionlessVerificationEnabled(true)` without redeploying the registry.
+
+Official-only admission contains the current permissionless verifier-Sybil attack surface but does not solve its economics. Before enabling permissionless verification, audit finding C-01 must be remediated with a stronger stake/quorum/slashing design or its risk must be explicitly accepted and disclosed.
+
 ### Answer Access Economics
 
 With the current reference settings, paid answer download uses the same payment asset as the bounty. A USDC bounty has USDC reward, solver payout, verifier reward pool, solver bond, and answer access fee. A `3SAT` bounty has the same flows in `3SAT`. The owner can later change accepted payment-asset policy and custom access pricing without redeploying the core contracts.
+
+Access quotes distinguish `Public`, `Priced`, `Unconfigured`, and `Disabled`; a numeric zero is not by itself an authorization signal. Paid purchases bind the user's maximum accepted price, transaction deadline, and quoted `BountyManager` epoch, so an owner price update cannot charge more than approved and a manager replacement cannot redirect a pending purchase to a reused bounty ID.
+
+Finalization attempts normal immediate payouts first. If a solver, issuer, or verifier cannot receive the payment token, the bounty still finalizes and the failed amount becomes a beneficiary-owned claimable balance. The beneficiary can later claim to a different recipient address.
 
 | Flow | Amount |
 | --- | ---: |
