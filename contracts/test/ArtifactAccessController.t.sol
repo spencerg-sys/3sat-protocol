@@ -59,7 +59,6 @@ contract ArtifactAccessControllerTest is Test {
     ArtifactAccessController internal access;
 
     bytes32 internal salt = keccak256("salt");
-    string internal solutionRef = "r2://3sat-artifacts-dev/solutions/answer.cnf";
     bytes32 internal solutionDigest = keccak256("solution-bytes");
 
     uint256 internal reward = 1_000 ether;
@@ -696,7 +695,6 @@ contract ArtifactAccessControllerTest is Test {
             solver,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             salt
         );
@@ -712,31 +710,14 @@ contract ArtifactAccessControllerTest is Test {
             submissionId,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             salt
         );
 
         vm.prank(verifierA);
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
         vm.prank(verifierB);
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
 
         manager.finalize(bountyId, submissionId);
     }
@@ -748,7 +729,6 @@ contract ArtifactAccessControllerTest is Test {
             solver,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             salt
         );
@@ -764,31 +744,14 @@ contract ArtifactAccessControllerTest is Test {
             submissionId,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             salt
         );
 
         vm.prank(verifierA);
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
         vm.prank(verifierB);
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
 
         manager.finalize(bountyId, submissionId);
     }

@@ -9,7 +9,7 @@ The protocol lets an issuer escrow a token-denominated bounty for a SAT/CNF inst
 ## What The Protocol Does
 
 - Issuers post SAT/CNF bounties and escrow the bounty reward.
-- Solvers commit to a solution before revealing the solution reference and digest.
+- Solvers commit to a solution before revealing its digest, kind, and proof format.
 - Verifiers stake `3SAT`; under the default official-only admission policy they must also be approved by the protocol owner before they can attest accept or reject.
 - Accepted submissions can be finalized by protocol automation or any caller; verifier eligibility is required for attestation, not finalization.
 - Finalized answers can be made available through paid artifact access.
@@ -83,7 +83,7 @@ These are set per bounty by the issuer when a bounty is created.
 | Payment asset | ERC-20 token selected by the issuer for this bounty, currently `USDC` or `3SAT` |
 | Reward | Main bounty reward escrowed for the winning solver |
 | Commit window | Time available for solvers to commit solution hashes; minimum `1 hour` |
-| Reveal window | Time available for committed solvers to reveal solution references and digests; minimum `1 hour` |
+| Reveal window | Time available for committed solvers to reveal solution digests and descriptors; minimum `1 hour` |
 | Verification window | Time available for eligible verifiers to attest to revealed submissions; minimum `1 hour` |
 | Verifier quorum | Number of accept attestations required for an accepted candidate; range `1-100` |
 
@@ -167,8 +167,8 @@ Common CLI commands:
 3sat buy-answer SAT-XXXX-XXXX-XXXX --send
 3sat download-answer SAT-XXXX-XXXX-XXXX -o answer.zip
 3sat upload-solution answer.cnf --kind sat
-3sat prepare-commit SAT-XXXX-XXXX-XXXX --solver 0xSolverWallet --solution-ref r2://... --solution-digest 0x...
-3sat commit SAT-XXXX-XXXX-XXXX --solution-ref r2://... --solution-digest 0x... --private-key 0x... --send
+3sat prepare-commit SAT-XXXX-XXXX-XXXX --solver 0xSolverWallet --artifact-id ARTIFACT_ID --solution-digest 0x...
+3sat commit SAT-XXXX-XXXX-XXXX --artifact-id ARTIFACT_ID --solution-digest 0x... --private-key 0x... --send
 3sat reveal --bundle reveal.json --submission-id 1 --private-key 0x... --send
 ```
 

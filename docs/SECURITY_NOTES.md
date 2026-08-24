@@ -27,7 +27,7 @@ The API/server layer is untrusted and non-custodial by default. It may prepare c
 - Automation risk: keeper and indexer infrastructure must be monitored because finalization is permissionless but not self-executing.
 - Gas risk: bounty systems with many submissions or attestations need production gas review.
 - Economic risk: slashing, bond, reward, and quorum parameters must be calibrated against attack costs.
-- Metadata risk: references and digests are binding, but off-chain content availability still depends on storage operators.
+- Artifact availability risk: solution digests are binding, but off-chain content availability and the submission-to-object mapping still depend on storage operators.
 - Privacy risk: sensitive enterprise SAT instances require encryption and access policy beyond the public research data flow.
 - Time risk: vesting uses deterministic seconds-based months and years, not calendar months.
 
@@ -41,7 +41,8 @@ The API/server layer is untrusted and non-custodial by default. It may prepare c
 - Community and treasury release caps are enforced on-chain.
 - Bounty rewards, verifier reward pools, posting fees, solver bonds, and verifier slashes use `SafeERC20`.
 - Reentrancy protection on escrow, release, finalization, and access purchase flows.
-- Solver commitments bind bounty id, solver address, solution kind, proof format, solution reference, solution digest, and salt.
+- Solver commitments use canonical ABI encoding and bind chain id, manager address, bounty id, solver address, solution kind, proof format, solution digest, and salt.
+- Solution storage references never enter contract state, events, calldata, or commitment preimages; authenticated off-chain services bind artifacts to submissions and verify their digest before delivery.
 - Wrong reveal marks the submission invalid and slashes solver bond.
 - Non-revealed committed submissions can be slashed after the protocol windows close.
 - Verifier attestation eligibility is checked on-chain and defaults to fail-closed official-only admission.

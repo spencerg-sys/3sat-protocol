@@ -75,7 +75,6 @@ contract BountyManager is Ownable, ReentrancyGuard {
     struct Submission {
         address solver;
         bytes32 commitHash;
-        string solutionRef;
         bytes32 solutionDigest;
         SolutionKind solutionKind;
         ProofFormat proofFormat;
@@ -94,10 +93,6 @@ contract BountyManager is Ownable, ReentrancyGuard {
     struct Attestation {
         address verifier;
         bool support;
-        SolutionKind solutionKind;
-        ProofFormat proofFormat;
-        bytes32 solutionDigest;
-        string solutionRef;
         uint64 timestamp;
     }
 
@@ -152,7 +147,6 @@ contract BountyManager is Ownable, ReentrancyGuard {
         uint256 indexed bountyId,
         uint256 indexed submissionId,
         address indexed solver,
-        string solutionRef,
         bytes32 solutionDigest,
         SolutionKind solutionKind,
         ProofFormat proofFormat
@@ -162,8 +156,6 @@ contract BountyManager is Ownable, ReentrancyGuard {
         uint256 indexed submissionId,
         address indexed verifier,
         bool support,
-        SolutionKind solutionKind,
-        ProofFormat proofFormat,
         uint16 forVotes,
         uint16 againstVotes
     );
@@ -359,7 +351,6 @@ contract BountyManager is Ownable, ReentrancyGuard {
         submissions[bountyId][submissionId] = Submission({
             solver: msg.sender,
             commitHash: commitHash,
-            solutionRef: "",
             solutionDigest: bytes32(0),
             solutionKind: SolutionKind.None,
             proofFormat: ProofFormat.None,
@@ -388,7 +379,6 @@ contract BountyManager is Ownable, ReentrancyGuard {
         uint256 submissionId,
         SolutionKind solutionKind,
         ProofFormat proofFormat,
-        string calldata solutionRef,
         bytes32 solutionDigest,
         bytes32 salt
     ) external onlyExistingBounty(bountyId) nonReentrant {
@@ -408,12 +398,11 @@ contract BountyManager is Ownable, ReentrancyGuard {
             revert WindowClosed();
         }
         _validateSolutionDescriptor(solutionKind, proofFormat);
-        if (bytes(solutionRef).length == 0 || solutionDigest == bytes32(0)) {
+        if (solutionDigest == bytes32(0)) {
             revert InvalidReveal();
         }
 
-        bytes32 expected =
-            computeCommitHash(bountyId, msg.sender, solutionKind, proofFormat, solutionRef, solutionDigest, salt);
+        bytes32 expected = computeCommitHash(bountyId, msg.sender, solutionKind, proofFormat, solutionDigest, salt);
         if (expected != submission.commitHash) {
             submission.state = SubmissionState.Invalid;
             _slashSolverBondToRouter(bountyId, submissionId, submission);
@@ -421,7 +410,6 @@ contract BountyManager is Ownable, ReentrancyGuard {
             return;
         }
 
-        submission.solutionRef = solutionRef;
         submission.solutionDigest = solutionDigest;
         submission.solutionKind = solutionKind;
         submission.proofFormat = proofFormat;
@@ -429,9 +417,7 @@ contract BountyManager is Ownable, ReentrancyGuard {
         submission.state = SubmissionState.Revealed;
         bounty.revealDeadline = uint64(block.timestamp);
         bounty.verificationDeadline = uint64(block.timestamp) + bountyVerificationWindow[bountyId];
-        emit SolutionRevealed(
-            bountyId, submissionId, msg.sender, solutionRef, solutionDigest, solutionKind, proofFormat
-        );
+        emit SolutionRevealed(bountyId, submissionId, msg.sender, solutionDigest, solutionKind, proofFormat);
     }
 
     function slashExpiredSubmission(uint256 bountyId, uint256 submissionId)
@@ -454,15 +440,11 @@ contract BountyManager is Ownable, ReentrancyGuard {
         }
     }
 
-    function attest(
-        uint256 bountyId,
-        uint256 submissionId,
-        bool support,
-        SolutionKind solutionKind,
-        ProofFormat proofFormat,
-        string calldata solutionRef,
-        bytes32 solutionDigest
-    ) external onlyExistingBounty(bountyId) nonReentrant {
+    function attest(uint256 bountyId, uint256 submissionId, bool support)
+        external
+        onlyExistingBounty(bountyId)
+        nonReentrant
+    {
         Bounty storage bounty = bounties[bountyId];
         _requireBountyOpen(bounty);
         Submission storage submission = _submission(bountyId, submissionId);
@@ -484,15 +466,6 @@ contract BountyManager is Ownable, ReentrancyGuard {
         if (hasAttested[bountyId][submissionId][msg.sender]) {
             revert DuplicateAttestation();
         }
-        _validateSolutionDescriptor(solutionKind, proofFormat);
-        if (
-            solutionKind != submission.solutionKind || proofFormat != submission.proofFormat
-                || solutionDigest != submission.solutionDigest
-                || keccak256(bytes(solutionRef)) != keccak256(bytes(submission.solutionRef))
-        ) {
-            revert InvalidReveal();
-        }
-
         hasAttested[bountyId][submissionId][msg.sender] = true;
         if (support) {
             submission.forVotes++;
@@ -500,27 +473,10 @@ contract BountyManager is Ownable, ReentrancyGuard {
             submission.againstVotes++;
         }
         attestations[bountyId][submissionId].push(
-            Attestation({
-                verifier: msg.sender,
-                support: support,
-                solutionKind: solutionKind,
-                proofFormat: proofFormat,
-                solutionDigest: solutionDigest,
-                solutionRef: solutionRef,
-                timestamp: uint64(block.timestamp)
-            })
+            Attestation({ verifier: msg.sender, support: support, timestamp: uint64(block.timestamp) })
         );
 
-        emit Attested(
-            bountyId,
-            submissionId,
-            msg.sender,
-            support,
-            solutionKind,
-            proofFormat,
-            submission.forVotes,
-            submission.againstVotes
-        );
+        emit Attested(bountyId, submissionId, msg.sender, support, submission.forVotes, submission.againstVotes);
 
         if (submission.state == SubmissionState.Revealed) {
             if (submission.forVotes >= bounty.verifierQuorum) {
@@ -698,12 +654,11 @@ contract BountyManager is Ownable, ReentrancyGuard {
         address solver,
         SolutionKind solutionKind,
         ProofFormat proofFormat,
-        string memory solutionRef,
         bytes32 solutionDigest,
         bytes32 salt
-    ) public pure returns (bytes32) {
+    ) public view returns (bytes32) {
         return keccak256(
-            abi.encodePacked(bountyId, solver, solutionKind, proofFormat, solutionRef, solutionDigest, salt)
+            abi.encode(block.chainid, address(this), bountyId, solver, solutionKind, proofFormat, solutionDigest, salt)
         );
     }
 

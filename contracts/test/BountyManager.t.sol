@@ -41,7 +41,6 @@ contract BountyManagerTest is Test {
     BountyManager internal manager;
 
     bytes32 internal salt = keccak256("salt");
-    string internal solutionRef = "ipfs://solution";
     bytes32 internal solutionDigest = keccak256("solution-bytes");
 
     uint256 internal reward = 1_000 ether;
@@ -137,7 +136,7 @@ contract BountyManagerTest is Test {
         vm.prank(owner);
         manager.setPaymentTokenConfig(address(token), false, 0);
 
-        uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
+        uint256 submissionId = _commit(bountyId, solver, solutionDigest, salt);
         BountyManager.Submission memory submission = manager.getSubmission(bountyId, submissionId);
         assertEq(submission.solverBond, solverBond);
         assertFalse(manager.acceptedPaymentToken(address(token)));
@@ -146,14 +145,13 @@ contract BountyManagerTest is Test {
 
     function testMaxVerifierQuorumCanFinalizeWithinGasBudget() public {
         uint256 bountyId = _createBountyWithQuorum(manager.MAX_VERIFIER_QUORUM());
-        uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
+        uint256 submissionId = _commit(bountyId, solver, solutionDigest, salt);
         vm.prank(solver);
         manager.revealSolution(
             bountyId,
             submissionId,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             salt
         );
@@ -165,15 +163,7 @@ contract BountyManagerTest is Test {
             _fund(verifier, minimumStake);
             _stakeVerifier(verifier);
             vm.prank(verifier);
-            manager.attest(
-                bountyId,
-                submissionId,
-                false,
-                BountyManager.SolutionKind.SatAssignment,
-                BountyManager.ProofFormat.None,
-                solutionRef,
-                solutionDigest
-            );
+            manager.attest(bountyId, submissionId, false);
         }
 
         for (uint160 i = 0; i < manager.MAX_VERIFIER_QUORUM(); i++) {
@@ -181,15 +171,7 @@ contract BountyManagerTest is Test {
             _fund(verifier, minimumStake);
             _stakeVerifier(verifier);
             vm.prank(verifier);
-            manager.attest(
-                bountyId,
-                submissionId,
-                true,
-                BountyManager.SolutionKind.SatAssignment,
-                BountyManager.ProofFormat.None,
-                solutionRef,
-                solutionDigest
-            );
+            manager.attest(bountyId, submissionId, true);
         }
         assertEq(manager.getAttestations(bountyId, submissionId).length, 199);
 
@@ -206,16 +188,69 @@ contract BountyManagerTest is Test {
         BountyManager.Submission memory submission = manager.getSubmission(bountyId, submissionId);
 
         assertEq(submission.solver, solver);
-        assertEq(submission.solutionRef, solutionRef);
         assertEq(submission.solutionDigest, solutionDigest);
         assertEq(uint256(submission.solutionKind), uint256(BountyManager.SolutionKind.SatAssignment));
         assertEq(uint256(submission.proofFormat), uint256(BountyManager.ProofFormat.None));
         assertEq(uint256(submission.state), uint256(BountyManager.SubmissionState.Revealed));
     }
 
+    function testCommitHashUsesCanonicalEncodingAndDomainSeparation() public {
+        uint256 bountyId = 42;
+        bytes32 proofDigest = keccak256("frat-proof");
+        bytes32 proofSalt = keccak256("proof-salt");
+        bytes32 expected = keccak256(
+            abi.encode(
+                block.chainid,
+                address(manager),
+                bountyId,
+                solver,
+                BountyManager.SolutionKind.UnsatProof,
+                BountyManager.ProofFormat.FRAT,
+                proofDigest,
+                proofSalt
+            )
+        );
+        bytes32 actual = manager.computeCommitHash(
+            bountyId,
+            solver,
+            BountyManager.SolutionKind.UnsatProof,
+            BountyManager.ProofFormat.FRAT,
+            proofDigest,
+            proofSalt
+        );
+        assertEq(actual, expected);
+
+        BountyManager otherManager = new BountyManager(token, registry, router, solverBond, VERIFIER_REWARD_BPS, owner);
+        assertNotEq(
+            otherManager.computeCommitHash(
+                bountyId,
+                solver,
+                BountyManager.SolutionKind.UnsatProof,
+                BountyManager.ProofFormat.FRAT,
+                proofDigest,
+                proofSalt
+            ),
+            actual
+        );
+
+        uint256 originalChainId = block.chainid;
+        vm.chainId(originalChainId + 1);
+        assertNotEq(
+            manager.computeCommitHash(
+                bountyId,
+                solver,
+                BountyManager.SolutionKind.UnsatProof,
+                BountyManager.ProofFormat.FRAT,
+                proofDigest,
+                proofSalt
+            ),
+            actual
+        );
+        vm.chainId(originalChainId);
+    }
+
     function testUnsatProofCommitRevealAndFinalize() public {
         uint256 bountyId = _createBounty();
-        string memory proofRef = "ipfs://proof.frat";
         bytes32 proofDigest = keccak256("frat-proof");
         bytes32 proofSalt = keccak256("proof-salt");
         bytes32 commitHash = manager.computeCommitHash(
@@ -223,7 +258,6 @@ contract BountyManagerTest is Test {
             solver,
             BountyManager.SolutionKind.UnsatProof,
             BountyManager.ProofFormat.FRAT,
-            proofRef,
             proofDigest,
             proofSalt
         );
@@ -236,7 +270,6 @@ contract BountyManagerTest is Test {
             submissionId,
             BountyManager.SolutionKind.UnsatProof,
             BountyManager.ProofFormat.FRAT,
-            proofRef,
             proofDigest,
             proofSalt
         );
@@ -247,25 +280,9 @@ contract BountyManagerTest is Test {
         assertEq(uint256(submission.proofFormat), uint256(BountyManager.ProofFormat.FRAT));
 
         vm.prank(verifierA);
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.UnsatProof,
-            BountyManager.ProofFormat.FRAT,
-            proofRef,
-            proofDigest
-        );
+        manager.attest(bountyId, submissionId, true);
         vm.prank(verifierB);
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.UnsatProof,
-            BountyManager.ProofFormat.FRAT,
-            proofRef,
-            proofDigest
-        );
+        manager.attest(bountyId, submissionId, true);
 
         manager.finalize(bountyId, submissionId);
         BountyManager.Submission memory finalized = manager.getSubmission(bountyId, submissionId);
@@ -275,7 +292,7 @@ contract BountyManagerTest is Test {
 
     function testCommitAllowsImmediateRevealAndStartsVerificationWindow() public {
         uint256 bountyId = _createBounty();
-        uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
+        uint256 submissionId = _commit(bountyId, solver, solutionDigest, salt);
         BountyManager.Bounty memory afterCommit = manager.getBounty(bountyId);
         assertEq(afterCommit.commitDeadline, block.timestamp);
         assertEq(afterCommit.revealDeadline, block.timestamp + REVEAL_WINDOW);
@@ -287,7 +304,6 @@ contract BountyManagerTest is Test {
             submissionId,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             salt
         );
@@ -299,14 +315,13 @@ contract BountyManagerTest is Test {
 
     function testActiveSubmissionBlocksCompetingCommitUntilResolved() public {
         uint256 bountyId = _createBounty();
-        _commit(bountyId, solver, solutionRef, solutionDigest, salt);
+        _commit(bountyId, solver, solutionDigest, salt);
 
         bytes32 competingCommitHash = manager.computeCommitHash(
             bountyId,
             solverTwo,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            "ipfs://solution-two",
             keccak256("solution-two"),
             keccak256("salt-two")
         );
@@ -319,7 +334,7 @@ contract BountyManagerTest is Test {
 
     function testWrongSaltRevealSlashesSolverBond() public {
         uint256 bountyId = _createBounty();
-        uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
+        uint256 submissionId = _commit(bountyId, solver, solutionDigest, salt);
         uint256 supplyBefore = token.totalSupply();
         uint256 treasuryBefore = token.balanceOf(treasury);
         vm.prank(solver);
@@ -328,7 +343,6 @@ contract BountyManagerTest is Test {
             submissionId,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             keccak256("wrong")
         );
@@ -343,14 +357,13 @@ contract BountyManagerTest is Test {
 
     function testWrongSolutionDigestRevealSlashesSolverBond() public {
         uint256 bountyId = _createBounty();
-        uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
+        uint256 submissionId = _commit(bountyId, solver, solutionDigest, salt);
         vm.prank(solver);
         manager.revealSolution(
             bountyId,
             submissionId,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             keccak256("different-solution"),
             salt
         );
@@ -358,14 +371,13 @@ contract BountyManagerTest is Test {
         BountyManager.Submission memory submission = manager.getSubmission(bountyId, submissionId);
         assertEq(uint256(submission.state), uint256(BountyManager.SubmissionState.Invalid));
         assertTrue(submission.bondSlashed);
-        assertEq(submission.solutionRef, "");
         assertEq(submission.solutionDigest, bytes32(0));
         assertEq(manager.activeSubmissionId(bountyId), 0);
     }
 
     function testNonRevealTimeoutSlashesSolver() public {
         uint256 bountyId = _createBounty();
-        uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
+        uint256 submissionId = _commit(bountyId, solver, solutionDigest, salt);
 
         vm.warp(GENESIS + REVEAL_WINDOW + 1);
         manager.slashExpiredSubmission(bountyId, submissionId);
@@ -408,15 +420,7 @@ contract BountyManagerTest is Test {
         (uint256 bountyId, uint256 submissionId,) = _createCommitReveal();
         vm.prank(candidate);
         vm.expectRevert(abi.encodeWithSelector(BountyManager.IneligibleVerifier.selector, candidate));
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
     }
 
     function testOwnerCanPreapproveAndRevokeOfficialVerifier() public {
@@ -462,15 +466,7 @@ contract BountyManagerTest is Test {
 
         (uint256 bountyId, uint256 submissionId,) = _createCommitReveal();
         vm.prank(candidate);
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
         assertEq(manager.getAttestations(bountyId, submissionId).length, 1);
 
         vm.prank(owner);
@@ -506,38 +502,14 @@ contract BountyManagerTest is Test {
 
         vm.prank(nonVerifier);
         vm.expectRevert();
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
 
         vm.prank(verifierA);
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
 
         vm.prank(verifierA);
         vm.expectRevert(BountyManager.DuplicateAttestation.selector);
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
     }
 
     function testSolverAndIssuerCannotAttestConflictedSubmission() public {
@@ -546,28 +518,12 @@ contract BountyManagerTest is Test {
         _stakeVerifier(solver);
         vm.prank(solver);
         vm.expectRevert(abi.encodeWithSelector(BountyManager.ConflictedVerifier.selector, solver));
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
 
         _stakeVerifier(issuer);
         vm.prank(issuer);
         vm.expectRevert(abi.encodeWithSelector(BountyManager.ConflictedVerifier.selector, issuer));
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
     }
 
     function testQuorumAcceptedIsImmediatelyFinalizable() public {
@@ -591,25 +547,9 @@ contract BountyManagerTest is Test {
         (uint256 bountyId, uint256 submissionId,) = _createCommitReveal();
 
         vm.prank(verifierA);
-        manager.attest(
-            bountyId,
-            submissionId,
-            false,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, false);
         vm.prank(verifierB);
-        manager.attest(
-            bountyId,
-            submissionId,
-            false,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, false);
 
         BountyManager.Submission memory submission = manager.getSubmission(bountyId, submissionId);
         assertEq(uint256(submission.state), uint256(BountyManager.SubmissionState.PendingRejected));
@@ -620,8 +560,7 @@ contract BountyManagerTest is Test {
         BountyManager.Bounty memory bounty = manager.getBounty(bountyId);
         assertEq(bounty.commitDeadline, block.timestamp + COMMIT_WINDOW);
 
-        uint256 nextSubmissionId =
-            _commit(bountyId, solverTwo, "ipfs://solution-two", keccak256("solution-two"), keccak256("salt-two"));
+        uint256 nextSubmissionId = _commit(bountyId, solverTwo, keccak256("solution-two"), keccak256("salt-two"));
         assertEq(nextSubmissionId, 2);
     }
 
@@ -658,7 +597,6 @@ contract BountyManagerTest is Test {
             solver,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             salt
         );
@@ -671,7 +609,6 @@ contract BountyManagerTest is Test {
             submissionId,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             salt
         );
@@ -811,15 +748,7 @@ contract BountyManagerTest is Test {
         address payoutRecipient = address(0xB0B2);
         (uint256 bountyId, uint256 submissionId) = _createUsdcCommitReveal();
         vm.prank(verifierA);
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
 
         _warpPastVerificationDeadline();
         manager.finalize(bountyId, 0);
@@ -854,7 +783,7 @@ contract BountyManagerTest is Test {
     function testNoRevealTimeoutReopensThenNoWinnerFinalizationRefundsIssuer() public {
         uint256 issuerBefore = token.balanceOf(issuer);
         uint256 bountyId = _createBounty();
-        uint256 submissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
+        uint256 submissionId = _commit(bountyId, solver, solutionDigest, salt);
 
         vm.warp(GENESIS + REVEAL_WINDOW + 1);
         manager.slashExpiredSubmission(bountyId, submissionId);
@@ -882,25 +811,9 @@ contract BountyManagerTest is Test {
         (uint256 bountyId, uint256 submissionId,) = _createCommitReveal();
 
         vm.prank(verifierA);
-        manager.attest(
-            bountyId,
-            submissionId,
-            false,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, false);
         vm.prank(verifierB);
-        manager.attest(
-            bountyId,
-            submissionId,
-            false,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, false);
 
         vm.expectRevert(BountyManager.NotFinalizable.selector);
         manager.finalize(bountyId, submissionId);
@@ -916,15 +829,7 @@ contract BountyManagerTest is Test {
         (uint256 bountyId, uint256 submissionId,) = _createCommitReveal();
 
         vm.prank(verifierA);
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
 
         _warpPastVerificationDeadline();
         manager.finalize(bountyId, 0);
@@ -1015,47 +920,28 @@ contract BountyManagerTest is Test {
 
     function testRejectedSubmissionReopensAndNextSolverCanWin() public {
         uint256 bountyId = _createBounty();
-        uint256 rejectedSubmissionId =
-            _commit(bountyId, solverTwo, "ipfs://bad", keccak256("bad"), keccak256("bad-salt"));
+        uint256 rejectedSubmissionId = _commit(bountyId, solverTwo, keccak256("bad"), keccak256("bad-salt"));
         vm.prank(solverTwo);
         manager.revealSolution(
             bountyId,
             rejectedSubmissionId,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            "ipfs://bad",
             keccak256("bad"),
             keccak256("bad-salt")
         );
         vm.prank(verifierA);
-        manager.attest(
-            bountyId,
-            rejectedSubmissionId,
-            false,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            "ipfs://bad",
-            keccak256("bad")
-        );
+        manager.attest(bountyId, rejectedSubmissionId, false);
         vm.prank(verifierB);
-        manager.attest(
-            bountyId,
-            rejectedSubmissionId,
-            false,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            "ipfs://bad",
-            keccak256("bad")
-        );
+        manager.attest(bountyId, rejectedSubmissionId, false);
 
-        uint256 winningSubmissionId = _commit(bountyId, solver, solutionRef, solutionDigest, salt);
+        uint256 winningSubmissionId = _commit(bountyId, solver, solutionDigest, salt);
         vm.prank(solver);
         manager.revealSolution(
             bountyId,
             winningSubmissionId,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             salt
         );
@@ -1174,18 +1060,12 @@ contract BountyManagerTest is Test {
         return manager.verifierRewardPoolFor(reward);
     }
 
-    function _commit(uint256 bountyId, address solver_, string memory ref, bytes32 digest_, bytes32 salt_)
+    function _commit(uint256 bountyId, address solver_, bytes32 digest_, bytes32 salt_)
         internal
         returns (uint256 submissionId)
     {
         bytes32 commitHash = manager.computeCommitHash(
-            bountyId,
-            solver_,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            ref,
-            digest_,
-            salt_
+            bountyId, solver_, BountyManager.SolutionKind.SatAssignment, BountyManager.ProofFormat.None, digest_, salt_
         );
         vm.startPrank(solver_);
         token.approve(address(manager), solverBond);
@@ -1200,7 +1080,6 @@ contract BountyManagerTest is Test {
             solver,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             salt
         );
@@ -1215,7 +1094,6 @@ contract BountyManagerTest is Test {
             submissionId,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             salt
         );
@@ -1228,7 +1106,6 @@ contract BountyManagerTest is Test {
             solver,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             salt
         );
@@ -1240,7 +1117,6 @@ contract BountyManagerTest is Test {
             submissionId,
             BountyManager.SolutionKind.SatAssignment,
             BountyManager.ProofFormat.None,
-            solutionRef,
             solutionDigest,
             salt
         );
@@ -1249,25 +1125,9 @@ contract BountyManagerTest is Test {
 
     function _attestFor(uint256 bountyId, uint256 submissionId) internal {
         vm.prank(verifierA);
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
         vm.prank(verifierB);
-        manager.attest(
-            bountyId,
-            submissionId,
-            true,
-            BountyManager.SolutionKind.SatAssignment,
-            BountyManager.ProofFormat.None,
-            solutionRef,
-            solutionDigest
-        );
+        manager.attest(bountyId, submissionId, true);
     }
 
     function _warpPastVerificationDeadline() internal {

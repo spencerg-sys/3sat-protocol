@@ -3,8 +3,7 @@ pragma solidity ^0.8.24;
 
 import { Test } from "forge-std/Test.sol";
 
-import { MigrateArbitrumSepolia } from "../script/MigrateArbitrumSepolia.s.sol";
-import { BountyManager } from "../src/BountyManager.sol";
+import { ILegacyBountyManager, MigrateArbitrumSepolia } from "../script/MigrateArbitrumSepolia.s.sol";
 import { TreasuryRouter } from "../src/TreasuryRouter.sol";
 import { MockERC20 } from "./mocks/MockERC20.sol";
 
@@ -16,7 +15,7 @@ contract MockSettledLegacyBountyManager {
         settleBountyNineSubmission = settled;
     }
 
-    function getBounty(uint256 bountyId) external pure returns (BountyManager.Bounty memory bounty) {
+    function getBounty(uint256 bountyId) external pure returns (ILegacyBountyManager.Bounty memory bounty) {
         if (bountyId > 0 && bountyId < nextBountyId) {
             bounty.issuer = address(0x111);
             bounty.finalized = true;
@@ -27,7 +26,7 @@ contract MockSettledLegacyBountyManager {
     function getSubmission(uint256 bountyId, uint256 submissionId)
         external
         view
-        returns (BountyManager.Submission memory submission)
+        returns (ILegacyBountyManager.Submission memory submission)
     {
         if (bountyId > 0 && bountyId < nextBountyId && submissionId == 1) {
             submission.solver = address(0x222);

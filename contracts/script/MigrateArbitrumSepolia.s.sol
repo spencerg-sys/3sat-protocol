@@ -10,6 +10,55 @@ import { VerifierRegistry } from "../src/VerifierRegistry.sol";
 import { BountyManager } from "../src/BountyManager.sol";
 import { ArtifactAccessController, IBountyManagerAccessView } from "../src/ArtifactAccessController.sol";
 
+/// @dev Read-only ABI for the manager being retired. Its submission tuple must remain independent of
+///      the new BountyManager ABI so the cutover preflight can still inspect legacy bond settlement.
+interface ILegacyBountyManager {
+    struct Bounty {
+        address issuer;
+        address paymentToken;
+        string instanceCID;
+        bytes32 instanceDigest;
+        string metadataURI;
+        bytes32 metadataDigest;
+        uint256 reward;
+        uint256 verifierRewardPool;
+        uint256 postingFee;
+        uint64 commitDeadline;
+        uint64 revealDeadline;
+        uint64 verificationDeadline;
+        uint16 verifierQuorum;
+        uint256 submissionCount;
+        uint256 acceptedCandidateCount;
+        bool finalized;
+        bool postingFeeRouted;
+    }
+
+    struct Submission {
+        address solver;
+        bytes32 commitHash;
+        string storageLocation;
+        bytes32 solutionDigest;
+        uint8 solutionKind;
+        uint8 proofFormat;
+        address bondToken;
+        uint256 solverBond;
+        uint64 committedAt;
+        uint64 revealedAt;
+        uint64 quorumReachedAt;
+        uint16 forVotes;
+        uint16 againstVotes;
+        bool bondSettled;
+        bool bondSlashed;
+        uint8 state;
+    }
+
+    function nextBountyId() external view returns (uint256);
+
+    function getBounty(uint256 bountyId) external view returns (Bounty memory);
+
+    function getSubmission(uint256 bountyId, uint256 submissionId) external view returns (Submission memory);
+}
+
 /// @title MigrateArbitrumSepolia
 /// @notice Deploys the three non-upgradeable contracts needed for the reviewed Arbitrum Sepolia cutover.
 /// @dev The existing SAT token, TreasuryRouter, and USDC are reused and never redeployed or reconfigured.
@@ -44,7 +93,7 @@ contract MigrateArbitrumSepolia is Script {
         IERC20 satToken;
         IERC20 usdc;
         TreasuryRouter treasuryRouter;
-        BountyManager legacyManager;
+        ILegacyBountyManager legacyManager;
         address finalOwner;
         address expectedTreasury;
         address officialVerifier;
@@ -156,7 +205,7 @@ contract MigrateArbitrumSepolia is Script {
         config.treasuryRouter = TreasuryRouter(vm.envOr("MIGRATION_TREASURY_ROUTER_ADDRESS", CURRENT_TREASURY_ROUTER));
         config.usdc = IERC20(vm.envOr("MIGRATION_USDC_ADDRESS", CURRENT_USDC));
         config.legacyManager =
-            BountyManager(vm.envOr("MIGRATION_LEGACY_BOUNTY_MANAGER_ADDRESS", CURRENT_BOUNTY_MANAGER));
+            ILegacyBountyManager(vm.envOr("MIGRATION_LEGACY_BOUNTY_MANAGER_ADDRESS", CURRENT_BOUNTY_MANAGER));
         config.finalOwner = vm.envOr("MIGRATION_FINAL_OWNER_ADDRESS", CURRENT_PROTOCOL_ADMIN);
         config.expectedTreasury = vm.envOr("MIGRATION_EXPECTED_TREASURY_ADDRESS", CURRENT_TREASURY);
         config.expectedLegacyNextBountyId = vm.envOr("MIGRATION_EXPECTED_LEGACY_NEXT_BOUNTY_ID", CURRENT_NEXT_BOUNTY_ID);
@@ -222,7 +271,7 @@ contract MigrateArbitrumSepolia is Script {
             revert LegacyManagerStateMismatch(actualNextBountyId, config.expectedLegacyNextBountyId);
         }
         for (uint256 bountyId = 1; bountyId < actualNextBountyId; bountyId++) {
-            BountyManager.Bounty memory legacyBounty = config.legacyManager.getBounty(bountyId);
+            ILegacyBountyManager.Bounty memory legacyBounty = config.legacyManager.getBounty(bountyId);
             if (!legacyBounty.finalized) {
                 revert LegacyBountyNotSettled(bountyId);
             }

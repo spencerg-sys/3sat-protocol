@@ -97,73 +97,74 @@ The deployment default is `verifierRewardBps = 200`, or 2% of bounty reward.
 
 ## Commit and Reveal
 
-Solvers first commit a hidden solution. The current v1 commitment is exactly the following Solidity expression from `BountyManager.computeCommitHash(...)`:
+Solvers first commit a hidden solution. The commitment is exactly the following Solidity expression from `BountyManager.computeCommitHash(...)`:
 
 ```solidity
-commitHash = keccak256(abi.encodePacked(
+commitHash = keccak256(abi.encode(
+    block.chainid,
+    address(this),
     bountyId,
     solver,
     solutionKind,
     proofFormat,
-    solutionRef,
     solutionDigest,
     salt
 ));
 ```
 
-The packed fields, in their binding order, are:
+The canonically ABI-encoded fields, in their binding order, are:
 
-| Position | Field | Exact Solidity type | Packed representation |
+| Position | Field | Exact Solidity type | ABI representation |
 | ---: | --- | --- | --- |
-| 1 | `bountyId` | `uint256` | 32-byte, big-endian unsigned integer |
-| 2 | `solver` | `address` | 20 raw address bytes |
-| 3 | `solutionKind` | `SolutionKind`, encoded as `uint8` | One byte: `1` = `SatAssignment`, `2` = `UnsatProof` |
-| 4 | `proofFormat` | `ProofFormat`, encoded as `uint8` | One byte: `0` = `None`, `1` = `DRAT`, `2` = `FRAT`, `3` = `LRAT` |
-| 5 | `solutionRef` | `string` | Exact string bytes, without a length prefix or padding |
-| 6 | `solutionDigest` | `bytes32` | 32 bytes |
-| 7 | `salt` | `bytes32` | 32 bytes |
+| 1 | `block.chainid` | `uint256` | 32-byte ABI word |
+| 2 | `address(this)` | `address` | Left-padded 32-byte ABI word for the deployed `BountyManager` |
+| 3 | `bountyId` | `uint256` | 32-byte ABI word |
+| 4 | `solver` | `address` | Left-padded 32-byte ABI word |
+| 5 | `solutionKind` | `SolutionKind`, encoded as `uint8` | 32-byte ABI word: `1` = `SatAssignment`, `2` = `UnsatProof` |
+| 6 | `proofFormat` | `ProofFormat`, encoded as `uint8` | 32-byte ABI word: `0` = `None`, `1` = `DRAT`, `2` = `FRAT`, `3` = `LRAT` |
+| 7 | `solutionDigest` | `bytes32` | 32 bytes |
+| 8 | `salt` | `bytes32` | 32 bytes |
 
-Client implementations must not omit or reorder `solutionKind` and `proofFormat`. They must also preserve the exact `solutionRef` bytes; trimming, Unicode normalization, case changes, or URI rewriting after commit produces a different hash. The website implementation uses the equivalent viem type list:
+Client implementations must use canonical `abi.encode`, not packed encoding, and must not omit or reorder any field. The equivalent viem type list is:
 
 ```typescript
-["uint256", "address", "uint8", "uint8", "string", "bytes32", "bytes32"]
+["uint256", "address", "uint256", "address", "uint8", "uint8", "bytes32", "bytes32"]
 ```
 
-### Chain and contract domain in v1
+The first value is the deployment chain ID and the second is the deployed `BountyManager` address. A commitment therefore cannot be replayed against another chain or another manager deployment.
 
-The v1 preimage does **not** include `block.chainid`, the `BountyManager` contract address, a protocol version, or an EIP-712 domain separator. `bountyId` is local to one `BountyManager`; it is not a globally unique domain identifier. Consequently, the same seven field values produce the same commitment on another chain or another deployment. The solver address prevents another address from revealing the commitment, but it does not provide chain or contract domain separation.
-
-This is the deployed v1 compatibility rule, not a claim that cross-deployment replay is cryptographically excluded. A future domain-separated commitment must be introduced as a versioned, coordinated contract and client change rather than silently changing this formula.
-
-### Fixed interoperability vector
+### Fixed encoding vector
 
 Every conforming implementation must produce the following fixed vector:
 
 | Field | Value |
 | --- | --- |
+| `chainId` | `421614` (Arbitrum Sepolia) |
+| `bountyManager` | `0x4444444444444444444444444444444444444444` |
 | `bountyId` | `42` |
 | `solver` | `0x1111111111111111111111111111111111111111` |
 | `solutionKind` | `2` (`UnsatProof`) |
 | `proofFormat` | `2` (`FRAT`) |
-| `solutionRef` | `ipfs://bafybeigdyrzt3sat-proof.frat` |
 | `solutionDigest` | `0x2222222222222222222222222222222222222222222222222222222222222222` |
 | `salt` | `0x3333333333333333333333333333333333333333333333333333333333333333` |
 
-The 153-byte packed preimage is:
+The 256-byte canonical ABI encoding is:
 
 ```text
-0x000000000000000000000000000000000000000000000000000000000000002a11111111111111111111111111111111111111110202697066733a2f2f62616679626569676479727a74337361742d70726f6f662e6672617422222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333
+0x0000000000000000000000000000000000000000000000000000000000066eee0000000000000000000000004444444444444444444444444444444444444444000000000000000000000000000000000000000000000000000000000000002a00000000000000000000000011111111111111111111111111111111111111110000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000222222222222222222222222222222222222222222222222222222222222222223333333333333333333333333333333333333333333333333333333333333333
 ```
 
 The expected commitment is:
 
 ```text
-0x9ba971dab4904c15091dcc19c403c600aa1d1c2c54ede92ebc4b4e8116377eb1
+0x5b071490eb66e47ffa263d2658481986253ce6f3fb11e79908e7dba50d52aeef
 ```
 
 Creating a bounty snapshots the then-current `solverBondForToken(paymentToken)` into `bountySolverBond(bountyId)`. Every solver committing to that bounty posts the snapshotted amount, so later owner changes affect only newly created bounties. The reference deployment default is `10 3SAT` for `3SAT` bounties and `10 USDC` for USDC bounties.
 
-Reveal verifies the commitment and stores `solutionRef` and `solutionDigest`. A wrong reveal marks the submission invalid and slashes the solver bond through `TreasuryRouter`.
+Reveal verifies the commitment and stores `solutionDigest`, `solutionKind`, and `proofFormat`. A wrong reveal marks the submission invalid and slashes the solver bond through `TreasuryRouter`.
+
+Artifact identifiers, object keys, bucket names, presigned URLs, and other storage references are deliberately absent from the commitment, submission, events, and every other on-chain interface. An authenticated off-chain artifact service associates uploaded bytes with the chain/deployment/bounty/submission tuple, checks that the uploader is the submission solver, and enforces an exact digest/kind/format match before serving those bytes. The artifact's `keccak256` digest is the on-chain integrity anchor; storage location is not protocol state.
 
 If a solver commits but never reveals, the submission can be finalized through the no-winner path after the reveal and verification windows close. That path slashes the solver bond.
 
@@ -186,7 +187,7 @@ Attestation rules:
 - A verifier cannot attest twice to the same submission.
 - A solver cannot attest to its own submission.
 - An issuer cannot attest on submissions for its own bounty.
-- Attestations bind to the revealed `solutionRef` and `solutionDigest`.
+- An attestation accepts only `(bountyId, submissionId, support)` and therefore binds to the immutable digest, kind, and format stored in that submission.
 - Accept quorum marks a submission `PendingAccepted`.
 - Reject quorum marks a submission `PendingRejected`.
 
