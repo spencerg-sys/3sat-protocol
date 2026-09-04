@@ -16,7 +16,6 @@ contract Deploy is Script {
     uint256 internal constant BPS_DENOMINATOR = 10_000;
     uint256 internal constant ETHEREUM_MAINNET_CHAIN_ID = 1;
     uint256 internal constant ARBITRUM_ONE_CHAIN_ID = 42_161;
-    address internal constant ARBITRUM_SEPOLIA_USDC = 0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d;
     address internal constant ARBITRUM_ONE_USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
     uint64 internal constant MONTH = 30 days;
 
@@ -207,9 +206,6 @@ contract Deploy is Script {
     }
 
     function _defaultUsdcAddress(uint256 chainId) internal pure returns (address) {
-        if (chainId == 421_614) {
-            return ARBITRUM_SEPOLIA_USDC;
-        }
         if (chainId == ARBITRUM_ONE_CHAIN_ID) {
             return ARBITRUM_ONE_USDC;
         }

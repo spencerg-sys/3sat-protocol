@@ -43,16 +43,15 @@ forge fmt
 forge test
 ```
 
-## Arbitrum Sepolia
+## Local Deployment Validation
 
-Arbitrum Sepolia is the preferred final test environment before Arbitrum One. It validates deployment, explorer verification, and bounty smoke tests without production funds.
+Use an isolated local EVM chain to validate the deployment script and the complete bounty lifecycle without production funds.
 
 ```bash
 cd contracts
 forge script script/Deploy.s.sol:Deploy \
-  --rpc-url "$ARBITRUM_SEPOLIA_RPC_URL" \
-  --broadcast \
-  --verify
+  --rpc-url "http://127.0.0.1:8545" \
+  --broadcast
 ```
 
 ## Arbitrum One
@@ -134,7 +133,7 @@ Official-only mode is containment, not a repair of C-01. Permissionless mode mus
 
 ## General Migration Notes
 
-`VerifierRegistry` is not proxy-upgradeable, so a testnet registry deployed before official-only admission cannot be changed in place. Deploy a new registry; do not assume source verification or an ABI update changes code already at the old address. The full `Deploy.s.sol` script creates a new token and full protocol stack, so use a dedicated migration script or reviewed Safe transaction batch when retaining an existing token and manager.
+`VerifierRegistry` is not proxy-upgradeable, so a legacy registry deployed before official-only admission cannot be changed in place. Deploy a new registry; do not assume source verification or an ABI update changes code already at the old address. The full `Deploy.s.sol` script creates a new token and full protocol stack, so use a dedicated migration script or reviewed Safe transaction batch when retaining an existing token and manager.
 
 For a registry-only migration:
 
@@ -151,13 +150,13 @@ If the latest audited `BountyManager` is also required, it too must be newly dep
 
 ## API, Indexer, and Client Cutover
 
-Treat the reviewed deployment JSON as one atomic address set. Before restoring the API or website, verify chain ID and non-empty bytecode at every configured address, and reconcile all testnet environment files rather than combining addresses from different deployments.
+Treat the reviewed deployment JSON as one atomic address set. Before restoring the API or website, verify chain ID and non-empty bytecode at every configured address, and reconcile every environment file rather than combining addresses from different deployments.
 
 For a registry-only migration, the `BountyManager` event source and its indexer start block remain unchanged. Update the website's verifier-registry address and every verifier client's `VERIFIER_REGISTRY_ADDRESS`, then restart those services. Existing verifier authorization and startup checks call `isEligible(address)`, so they automatically enforce official-only or permissionless admission once they point to the new registry. The generic issuer/solver CLI does not need a registry ABI change unless it begins displaying admission state.
 
 For a new `BountyManager`, update its address in the website, API, keeper, CLI, and access-controller configuration. Start a fresh index namespace or explicitly reindex from the new manager's deployment block; do not let reused numeric bounty IDs inherit cached state from the old manager. Verify the access-controller epoch and new manager pointer before enabling paid artifact access.
 
-Before opening the testnet UI or API, run an end-to-end smoke test: create a quorum-appropriate bounty, commit, reveal, attest with an eligible official verifier, finalize, and retrieve indexed state. Also confirm a registered and sufficiently staked but unapproved address remains ineligible and cannot attest. Test a permissionless-mode round trip only in a controlled environment; returning to official-only must not require redeployment or an address change.
+Before opening the production UI or API, run an end-to-end smoke test: create a quorum-appropriate bounty, commit, reveal, attest with an eligible official verifier, finalize, and retrieve indexed state. Also confirm a registered and sufficiently staked but unapproved address remains ineligible and cannot attest. Exercise a permissionless-mode round trip only in an isolated local environment; returning to official-only must not require redeployment or an address change.
 
 ## Explorer Verification
 

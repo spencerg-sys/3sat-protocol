@@ -11,11 +11,8 @@ via_ir = true
 ffi = false
 fs_permissions = [{ access = "read-write", path = "./deployments" }]
 
-[profile.sepolia]
-eth_rpc_url = "${SEPOLIA_RPC_URL}"
-
-[profile.arbitrum-sepolia]
-eth_rpc_url = "${ARBITRUM_SEPOLIA_RPC_URL}"
+[profile.local]
+eth_rpc_url = "http://127.0.0.1:8545"
 
 [profile.arbitrum]
 eth_rpc_url = "${ARBITRUM_RPC_URL}"

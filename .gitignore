@@ -10,6 +10,7 @@ contracts/cache/
 contracts/out/
 contracts/broadcast/
 contracts/deployments/*.json
+!contracts/deployments/3sat-42161.json
 
 anvil-*.txt
 *.log

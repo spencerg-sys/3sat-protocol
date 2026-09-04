@@ -180,11 +180,34 @@ Install Foundry, then run:
 
 ```bash
 cd contracts
-forge fmt
+forge fmt --check
 forge test
 ```
 
 The repository vendors the required Foundry dependencies in `contracts/lib` for reproducible local testing.
+
+## Production Source Release
+
+The production release is assembled from an explicit file allowlist. It includes
+the reviewed Arbitrum One deployment record and excludes local credentials,
+Foundry build state, broadcast records, generated artifacts, and vendored
+dependencies. Build to a new directory outside this repository:
+
+```powershell
+.\scripts\New-CleanRelease.ps1 -Destination C:\release\3sat-protocol
+```
+
+The staging command refuses an existing destination, audits every source file
+before copying, and then checks that the staged tree exactly matches
+`release-manifest.txt`. To audit an existing staged tree again:
+
+```powershell
+.\scripts\Test-ProductionRelease.ps1 -Path C:\release\3sat-protocol -Exact
+```
+
+The source-only release intentionally omits `contracts/lib`. Use the complete
+tagged repository, or restore the audited dependency revisions associated with
+the release tag, before compiling the staged source.
 
 ## License
 

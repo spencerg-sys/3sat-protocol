@@ -249,6 +249,29 @@ contract BountyManagerTest is Test {
         vm.chainId(originalChainId);
     }
 
+    function testFixedLocalCommitEncodingVector() public {
+        uint256 originalChainId = block.chainid;
+        vm.chainId(31_337);
+
+        address vectorManager = 0x4444444444444444444444444444444444444444;
+        bytes32 expectedCommitment = 0xeba2066d89faa2e842382a7e3c81a055205660aab1ad1b4510c5f20fb52d2046;
+        bytes32 actualCommitment = keccak256(
+            abi.encode(
+                block.chainid,
+                vectorManager,
+                uint256(42),
+                0x1111111111111111111111111111111111111111,
+                BountyManager.SolutionKind.UnsatProof,
+                BountyManager.ProofFormat.FRAT,
+                bytes32(uint256(0x2222222222222222222222222222222222222222222222222222222222222222)),
+                bytes32(uint256(0x3333333333333333333333333333333333333333333333333333333333333333))
+            )
+        );
+
+        assertEq(actualCommitment, expectedCommitment);
+        vm.chainId(originalChainId);
+    }
+
     function testUnsatProofCommitRevealAndFinalize() public {
         uint256 bountyId = _createBounty();
         bytes32 proofDigest = keccak256("frat-proof");
