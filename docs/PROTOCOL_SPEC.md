@@ -178,6 +178,31 @@ The 1-hour profile deliberately does not cover the Delayed Inbox force-inclusion
 
 Reference: [Arbitrum Nitro whitepaper, section 2.1](https://docs.arbitrum.io/nitro-whitepaper.pdf).
 
+## Off-chain artifact admission and delivery
+
+The current companion service/client profile accepts raw CNF instances and SAT
+unit-assignment files up to 256 MiB and UNSAT proofs up to 1 GiB. Multipart file
+parts go directly to R2; the website handles small authenticated reservation,
+completion and status messages. A separate artifact worker validates streamed
+raw-byte Keccak, size and CNF/assignment syntax before marking the upload `ready`.
+UNSAT upload admission is a byte/digest check, not proof acceptance. The official
+verifier independently validates the revealed answer before any attestation.
+
+DIMACS processing is bounded to 5,000,000 variables, 20,000,000 clauses,
+100,000,000 literal occurrences, 25,000,000 physical lines, 1 MiB per physical
+line and 5,000,000 literals per clause. Native checker preparation may produce a
+comment-free normalized copy, but commitments and stored object metadata remain
+bound to the original uploaded bytes. Upload limits and checker timeouts do not
+change Solidity state, the commitment preimage or fee/bond accounting.
+
+Finalized original answers can be delivered as `3sat-answer-manifest-v1`, with
+individually signed R2 URLs, names, kinds, byte sizes and raw on-chain digests.
+Clients stream and verify each file before assembling a local ZIP (release
+profile: 1.5 GiB). Answer-access authorization is unchanged. Interactive
+structural matching remains limited to 3.5 MiB / 50,000 variables / 100,000
+clauses / 300,000 literals; larger or count-heavy instances use raw-only search.
+Large variable-renaming matching is outside that interactive profile.
+
 ## Verifier Attestation
 
 Verifiers must be eligible in `VerifierRegistry`. Eligibility always requires registration, enabled status, and active stake at or above `minimumStake`. In the default official-only mode it additionally requires `officialVerifier(verifier) == true`; in permissionless mode the official-approval condition is waived, but the other three conditions remain.

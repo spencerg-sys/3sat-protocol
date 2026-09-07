@@ -28,6 +28,7 @@ The API/server layer is untrusted and non-custodial by default. It may prepare c
 - Gas risk: bounty systems with many submissions or attestations need production gas review.
 - Economic risk: slashing, bond, reward, and quorum parameters must be calibrated against attack costs.
 - Artifact availability risk: solution digests are binding, but off-chain content availability and the submission-to-object mapping still depend on storage operators.
+- Large-artifact operations: 256 MiB CNF/SAT and 1 GiB proof acceptance requires the matching direct-R2 API, artifact worker and upgraded clients/checkers. Upload readiness is not proof validity. Native resource exhaustion, failed resource admission and checker timeouts must defer verification, not become a negative attestation against an honest solver. Resource deferrals can still outlast a bounty's verification window.
 - Privacy risk: sensitive enterprise SAT instances require encryption and access policy beyond the public research data flow.
 - Time risk: vesting uses deterministic seconds-based months and years, not calendar months.
 

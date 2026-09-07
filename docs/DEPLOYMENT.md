@@ -158,6 +158,52 @@ For a new `BountyManager`, update its address in the website, API, keeper, CLI, 
 
 Before opening the production UI or API, run an end-to-end smoke test: create a quorum-appropriate bounty, commit, reveal, attest with an eligible official verifier, finalize, and retrieve indexed state. Also confirm a registered and sufficiently staked but unapproved address remains ineligible and cannot attest. Exercise a permissionless-mode round trip only in an isolated local environment; returning to official-only must not require redeployment or an address change.
 
+## Large-artifact service upgrade
+
+The 256 MiB CNF/SAT / 1 GiB UNSAT-proof release changes off-chain transport and
+resource budgets only. Do **not** rerun `Deploy.s.sol` for this upgrade: existing
+Arbitrum One addresses, stakes, Safe roles and event/FIFO start blocks remain.
+No contract economics or on-chain time windows are changed by a file-size update.
+
+Coordinate the website and CLI 0.1.1+, solver packages and official verifier
+0.2.0+ releases. The runtime host requires Linux AMD64, Node.js 22+, npm and
+`util-linux`. Preserve actual environment files and verifier FIFO state when
+replacing the clean package; merge the new numeric settings, never secrets from
+an example. Replace the fingerprinted `bin/3sat-proof-transformer` too: older
+native builds reject the new 1 GiB proof argument.
+
+The operator must keep four services running:
+
+| Service | Package entrypoint | Responsibility |
+| --- | --- | --- |
+| Verifier | `Start-Verifier.sh` in the official package | Chain reveal discovery, answer checking and attestations |
+| Keeper | Existing separate keeper package | Indexer/settlement automation |
+| UNSAT transform worker | `Start-Transform-Worker.sh` | Checked proof transformations for supported matched answers |
+| Artifact upload worker | New `Start-Artifact-Worker.sh` | Direct-upload byte/hash/DIMACS admission before readiness; no gas transaction |
+
+The website needs PostgreSQL, R2, browser `PUT` CORS with exposed `ETag`, and a
+matching `UNSAT_TRANSFORM_WORKER_TOKEN`. Both worker services use
+`.env.transform-worker`, not the verifier's private-key file. Deploy the matching
+artifact API, restart existing verifier/transform processes during an appropriate
+maintenance window, then start the new artifact worker in its own session.
+Check real processing and a completed upload, not merely a tmux session or a
+startup message. A VPS reboot is unnecessary; tmux itself does not restart failed
+processes or survive a reboot.
+
+Keep validation concurrency at two on the reference 4 GiB host; heavy native
+proof processes share one OS lock and a default 2 GiB address-space ceiling.
+Lock waiting consumes the existing finite checker timeout. Different users or
+systemd `PrivateTmp` require an explicitly shared writable lock outside private
+temporary directories. Keep swap and adequate scratch disk, monitor resource
+deferrals and deadlines, and do not interpret the file ceiling as a guarantee
+that every admitted problem can be checked within ten minutes.
+
+Large original answers use direct signed download manifests instead of a Vercel
+ZIP. Interactive structural matching is limited to 3.5 MiB and bounded counts;
+larger/count-heavy instances are raw-only. Do not silently promise large renamed
+target conversion. Only upload staging/incomplete multipart data may be expired;
+published instances, proofs and verifier FIFO must remain durable.
+
 ## Explorer Verification
 
 Use Foundry verification through `--verify`, or verify manually with:

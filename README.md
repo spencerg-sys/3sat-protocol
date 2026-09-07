@@ -17,6 +17,35 @@ The protocol lets an issuer escrow a token-denominated bounty for a SAT/CNF inst
 
 The web application, indexer, storage service, solver clients, and verifier clients are separate from this contract repository.
 
+## Off-chain artifact release profile
+
+The matching website/client release supports CNF instances and SAT assignment
+files up to **256 MiB**, UNSAT proofs up to **1 GiB**, and answer bundles up to
+**1.5 GiB**. These are off-chain admission/resource limits, not Solidity constants;
+this upgrade does not change contract addresses, commitments, staking, fees or
+bounty economics and does not require redeploying the contracts.
+
+Clients hash the original file bytes, upload 8 MiB multipart chunks directly to
+R2, and wait for the independent artifact worker to validate the digest, size
+and supported syntax before receiving a usable `artifactId`/reference. File bytes
+do not pass through Vercel's small request body. The verifier still checks the
+revealed solution against the on-chain digest and instance before attesting;
+upload readiness is not proof validity or chain finality.
+
+Large/count-heavy instances use raw-only search. Interactive structural matching
+remains bounded to 3.5 MiB, 50,000 variables, 100,000 clauses and 300,000 literal
+occurrences. Exact original answers use signed R2 download manifests; CLI 0.1.1+
+verifies streamed downloads and creates the ZIP locally. Large variable-renaming
+matching is not included in that claim. The shared DIMACS profile additionally
+caps files at 5,000,000 variables, 20,000,000 clauses, 100,000,000 literals,
+25,000,000 physical lines, 1 MiB per line and 5,000,000 literals per clause.
+
+Operators must run four separate services: official verifier, keeper, UNSAT
+transform worker and the new artifact upload worker. Use the matching CLI/solver
+release and official verifier 0.2.0+; old processes and already-downloaded clients
+do not update themselves. See [deployment cutover notes](docs/DEPLOYMENT.md#large-artifact-service-upgrade)
+and the official verifier package's `LARGE_ARTIFACTS.md` for migration details.
+
 ## Project Links
 
 - Website: https://3sat.network/
